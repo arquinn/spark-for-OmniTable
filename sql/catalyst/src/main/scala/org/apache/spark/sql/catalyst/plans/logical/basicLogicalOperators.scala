@@ -23,6 +23,7 @@ import org.apache.spark.sql.catalyst.catalog.{CatalogStorageFormat, CatalogTable
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.aggregate.AggregateExpression
 import org.apache.spark.sql.catalyst.plans._
+import org.apache.spark.sql.catalyst.plans.OrderedJoinType._
 import org.apache.spark.sql.catalyst.plans.physical.{HashPartitioning, Partitioning, RangePartitioning, RoundRobinPartitioning}
 import org.apache.spark.sql.types._
 import org.apache.spark.util.Utils
@@ -973,4 +974,43 @@ case class Deduplicate(
     child: LogicalPlan) extends UnaryNode {
 
   override def output: Seq[Attribute] = child.output
+}
+
+case class SDOrderedJoin(
+    left: LogicalPlan,
+    right: LogicalPlan,
+    leftExpr: Seq[Expression],
+    rightExpr: Seq[Expression],
+    extraConds: Option[Expression],
+    joinType: OrderedJoinType) extends BinaryNode with PredicateHelper {
+
+  override def output: Seq[Attribute] = {
+    joinType match {
+      // the only special case that I support is left antijoin
+      case LeftStackOJT =>
+        left.output ++ right.output.map(_.withNullability(true))
+      case _ =>
+        left.output ++ right.output
+    }
+  }
+
+  lazy val orderCond = leftExpr.zip(rightExpr).map(p => LessThan(p._1, p._2))
+
+  override protected def validConstraints: Set[Expression] = {
+    val allConstraints = left.constraints.union(right.constraints) ++ orderCond
+    if (extraConds.isDefined) {
+      allConstraints.union(splitConjunctivePredicates(extraConds.get).toSet)
+    }
+    allConstraints
+  }
+
+  def duplicateResolved: Boolean = left.outputSet.intersect(right.outputSet).isEmpty
+
+  // if not a natural join, use `resolvedExceptNatural`. if it is a natural join or
+  // using join, we still need to eliminate natural or using before we mark it resolved.
+  override lazy val resolved: Boolean =
+  childrenResolved &&
+    duplicateResolved &&
+    orderCond.map(_.resolved).forall(identity) &&
+    extraConds.forall(_.dataType == BooleanType)
 }

@@ -21,9 +21,9 @@ import java.util.Locale
 
 import com.google.common.collect.Maps
 
+import org.apache.spark.internal.Logging
 import org.apache.spark.sql.AnalysisException
 import org.apache.spark.sql.catalyst.analysis.{Resolver, UnresolvedAttribute}
-import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.types.{StructField, StructType}
 
 /**
@@ -107,7 +107,7 @@ package object expressions  {
   /**
    * Helper functions for working with `Seq[Attribute]`.
    */
-  implicit class AttributeSeq(val attrs: Seq[Attribute]) extends Serializable {
+  implicit class AttributeSeq(val attrs: Seq[Attribute]) extends Serializable with Logging{
     /** Creates a StructType with a schema matching this `Seq[Attribute]`. */
     def toStructType: StructType = {
       StructType(attrs.map(a => StructField(a.name, a.dataType, a.nullable, a.metadata)))
@@ -262,9 +262,10 @@ package object expressions  {
   }
 
   /**
+   * MOVED FOR THE OMNITABLE
    * When an expression inherits this, meaning the expression is null intolerant (i.e. any null
    * input will result in null output). We will use this information during constructing IsNotNull
    * constraints.
    */
-  trait NullIntolerant extends Expression
+  // trait NullIntolerant extends Expression
 }

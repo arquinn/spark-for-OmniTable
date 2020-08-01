@@ -35,7 +35,9 @@ import org.apache.spark.sql.catalyst._
 import org.apache.spark.sql.catalyst.analysis.UnresolvedRelation
 import org.apache.spark.sql.catalyst.encoders._
 import org.apache.spark.sql.catalyst.expressions.AttributeReference
-import org.apache.spark.sql.catalyst.plans.logical.{LocalRelation, Range}
+import org.apache.spark.sql.catalyst.optimizer.Optimizer
+import org.apache.spark.sql.catalyst.plans.logical.{LocalRelation, LogicalPlan, Range}
+import org.apache.spark.sql.catalyst.rules.RuleExecutor
 import org.apache.spark.sql.execution._
 import org.apache.spark.sql.execution.datasources.LogicalRelation
 import org.apache.spark.sql.internal._
@@ -78,19 +80,20 @@ class SparkSession private(
     @transient val sparkContext: SparkContext,
     @transient private val existingSharedState: Option[SharedState],
     @transient private val parentSessionState: Option[SessionState],
-    @transient private[sql] val extensions: SparkSessionExtensions)
+    @transient private[sql] val extensions: SparkSessionExtensions,
+    @transient val steamdrillOptimizer: Option[RuleExecutor[LogicalPlan]])
   extends Serializable with Closeable with Logging { self =>
 
   // The call site where this SparkSession was constructed.
   private val creationSite: CallSite = Utils.getCallSite()
 
   private[sql] def this(sc: SparkContext) {
-    this(sc, None, None, new SparkSessionExtensions)
+    this(sc, None, None, new SparkSessionExtensions, None)
   }
 
   sparkContext.assertNotStopped()
 
-  // If there is no active SparkSession, uses the default SQL conf. Otherwise, use the session's.
+  // If there is no active SparkSession, uses the default SQL conf . Otherwise, use the session's.
   SQLConf.setSQLConfGetter(() => {
     SparkSession.getActiveSession.filterNot(_.sparkContext.isStopped).map(_.sessionState.conf)
       .getOrElse(SQLConf.getFallbackConf)
@@ -237,7 +240,8 @@ class SparkSession private(
    * @since 2.0.0
    */
   def newSession(): SparkSession = {
-    new SparkSession(sparkContext, Some(sharedState), parentSessionState = None, extensions)
+    new SparkSession(sparkContext, Some(sharedState), parentSessionState = None,
+                     extensions, steamdrillOptimizer)
   }
 
   /**
@@ -253,7 +257,8 @@ class SparkSession private(
    * implementation is Hive, this will initialize the metastore, which may take some time.
    */
   private[sql] def cloneSession(): SparkSession = {
-    val result = new SparkSession(sparkContext, Some(sharedState), Some(sessionState), extensions)
+    val result = new SparkSession(sparkContext, Some(sharedState), Some(sessionState),
+                                  extensions, steamdrillOptimizer)
     result.sessionState // force copy of SessionState
     result
   }
@@ -781,10 +786,21 @@ object SparkSession extends Logging {
 
     private[this] var userSuppliedContext: Option[SparkContext] = None
 
+    private[this] var steamdrillOpt: Option[RuleExecutor[LogicalPlan]] = None
+
     private[spark] def sparkContext(sparkContext: SparkContext): Builder = synchronized {
       userSuppliedContext = Option(sparkContext)
       this
     }
+
+    /**
+     * OMNITABLE addition:: added for steamdrill sytle iterative query evaluation
+     */
+    def steamdrillOptimizer(so: RuleExecutor[LogicalPlan]): Builder = synchronized {
+      steamdrillOpt = Option(so)
+      this
+    }
+
 
     /**
      * Sets a name for the application, which will be shown in the Spark web UI.
@@ -954,7 +970,7 @@ object SparkSession extends Logging {
           }
         }
 
-        session = new SparkSession(sparkContext, None, None, extensions)
+        session = new SparkSession(sparkContext, None, None, extensions, steamdrillOpt)
         options.foreach { case (k, v) => session.initialSessionOptions.put(k, v) }
         setDefaultSession(session)
         setActiveSession(session)
@@ -967,6 +983,8 @@ object SparkSession extends Logging {
             defaultSession.set(null)
           }
         })
+
+        // add the steamdrillOptimizer for the session:
       }
 
       return session

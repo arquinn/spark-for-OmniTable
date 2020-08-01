@@ -33,6 +33,7 @@ import org.apache.spark.api.java.JavaRDD
 import org.apache.spark.api.java.function._
 import org.apache.spark.api.python.{PythonRDD, SerDeUtil}
 import org.apache.spark.broadcast.Broadcast
+import org.apache.spark.internal.Logging
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst._
 import org.apache.spark.sql.catalyst.analysis._
@@ -53,6 +54,7 @@ import org.apache.spark.sql.execution.command._
 import org.apache.spark.sql.execution.datasources.LogicalRelation
 import org.apache.spark.sql.execution.python.EvaluatePython
 import org.apache.spark.sql.execution.stat.StatFunctions
+import org.apache.spark.sql.functions._
 import org.apache.spark.sql.streaming.DataStreamWriter
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.util.SchemaUtils
@@ -172,7 +174,7 @@ class Dataset[T] private[sql](
     @transient val sparkSession: SparkSession,
     @DeveloperApi @InterfaceStability.Unstable @transient val queryExecution: QueryExecution,
     encoder: Encoder[T])
-  extends Serializable {
+  extends Serializable with Logging {
 
   queryExecution.assertAnalyzed()
 
@@ -1133,9 +1135,26 @@ class Dataset[T] private[sql](
 
   /**
    * :: Experimental ::
+   *
+   * New for the OmniTable: STACKJOIN!
+   * This joins the two relations such that each row is joined with the next row
+   * of other (when ordered based on order1 and order2)
+   *
+   * @group typedrel
+   * @since 2.0.0
+   */
+  @Experimental
+  def orderedJoin(other: Dataset[_], condition: Column,
+                  order1: Seq[Column], order2: Seq[Column], t: String): DataFrame = {
+    withPlan(SDOrderedJoin(logicalPlan, other.logicalPlan,
+      order1.map(_.expr), order2.map(_.expr), Some(condition.expr), OrderedJoinType(t)))
+  }
+
+  /**
+   * :: Experimental ::
    * Using inner equi-join to join this Dataset returning a `Tuple2` for each pair
    * where `condition` evaluates to true.
-   *
+   *c
    * @param other Right side of the join.
    * @param condition Join expression.
    *
@@ -3362,7 +3381,18 @@ class Dataset[T] private[sql](
       }
       val start = System.nanoTime()
       val result = SQLExecution.withNewExecutionId(sparkSession, qe) {
-        action(qe.executedPlan)
+        var execPlan = qe.executedPlan
+        while(!qe.finished) {
+          sparkSession.sharedState.cacheManager.cacheNextPlan(qe, sparkSession)
+          qe.clearCaches
+          execPlan = qe.executedPlan // as far as I can tell... these are NEVER used?
+
+          // should action occur multiple times here??
+          // break out of infinite loop for now
+          // qe.finished = true
+        }
+
+        action(execPlan)
       }
       val end = System.nanoTime()
       sparkSession.listenerManager.onSuccess(name, qe, end - start)
@@ -3374,7 +3404,7 @@ class Dataset[T] private[sql](
     }
   }
 
-  /**
+    /**
    * Collect all elements from a spark plan.
    */
   private def collectFromPlan(plan: SparkPlan): Array[T] = {

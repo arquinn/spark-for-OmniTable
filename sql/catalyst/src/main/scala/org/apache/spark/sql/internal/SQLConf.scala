@@ -283,6 +283,14 @@ object SQLConf {
     .booleanConf
     .createWithDefault(false)
 
+
+  // OMNITABLE
+  val USE_MAPITEMGET_RESOLVER = buildConf("spark.sql.useMapItemGetResolver")
+    .internal()
+    .doc("Boolean telling us to use the MapItemGet resolver")
+    .booleanConf
+    .createWithDefault(false)
+
   val CONSTRAINT_PROPAGATION_ENABLED = buildConf("spark.sql.constraintPropagation.enabled")
     .internal()
     .doc("When true, the query optimizer will infer and propagate data constraints in the query " +
@@ -1727,16 +1735,23 @@ class SQLConf extends Serializable with Logging {
 
   def fastHashAggregateRowMaxCapacityBit: Int = getConf(FAST_HASH_AGGREGATE_MAX_ROWS_CAPACITY_BIT)
 
+  def useMapItemGetResolver: Boolean = getConf(SQLConf.USE_MAPITEMGET_RESOLVER)
+
   /**
    * Returns the [[Resolver]] for the current configuration, which can be used to determine if two
    * identifiers are equal.
    */
   def resolver: Resolver = {
+
+    var setting = org.apache.spark.sql.catalyst.analysis.caseInsensitiveResolution
     if (caseSensitiveAnalysis) {
-      org.apache.spark.sql.catalyst.analysis.caseSensitiveResolution
-    } else {
-      org.apache.spark.sql.catalyst.analysis.caseInsensitiveResolution
+      setting = org.apache.spark.sql.catalyst.analysis.caseSensitiveResolution
     }
+
+    if (useMapItemGetResolver) {
+      setting = org.apache.spark.sql.catalyst.analysis.mapItemGetResolver(setting)
+    }
+    setting
   }
 
   def subexpressionEliminationEnabled: Boolean =

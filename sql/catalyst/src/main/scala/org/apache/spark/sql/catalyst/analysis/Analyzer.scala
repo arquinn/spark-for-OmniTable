@@ -128,6 +128,7 @@ class Analyzer(
 
   def resolver: Resolver = conf.resolver
 
+
   protected val fixedPoint = FixedPoint(maxIterations)
 
   /**
@@ -881,21 +882,23 @@ class Analyzer(
     }
 
     private def resolve(e: Expression, q: LogicalPlan): Expression = e match {
-      case f: LambdaFunction if !f.bound => f
-      case u @ UnresolvedAttribute(nameParts) =>
-        // Leave unchanged if resolution fails. Hopefully will be resolved next round.
-        val result =
-          withPosition(u) {
-            q.resolveChildren(nameParts, resolver)
-              .orElse(resolveLiteralFunction(nameParts, u, q))
-              .getOrElse(u)
-          }
-        logDebug(s"Resolving $u to $result")
-        result
-      case UnresolvedExtractValue(child, fieldExpr) if child.resolved =>
-        ExtractValue(child, fieldExpr, resolver)
-      case _ => e.mapChildren(resolve(_, q))
-    }
+        case f: LambdaFunction if !f.bound => f
+        case u@UnresolvedAttribute(nameParts) =>
+          // Leave unchanged if resolution fails. Hopefully will be resolved next round.
+          val result =
+            withPosition(u) {
+              q.resolveChildren(nameParts, resolver)
+                              .orElse(resolveLiteralFunction(nameParts, u, q))
+                              .getOrElse(u)
+            }
+          logDebug(s"Resolved $u to $result within lp ${q.toString}" +
+            s" and resolver ${resolver.toString}")
+          result
+        case UnresolvedExtractValue(child, fieldExpr) if child.resolved =>
+          ExtractValue(child, fieldExpr, resolver)
+        case u =>
+          e.mapChildren(resolve(_, q))
+      }
 
     def apply(plan: LogicalPlan): LogicalPlan = plan.resolveOperatorsUp {
       case p: LogicalPlan if !p.childrenResolved => p
@@ -929,6 +932,12 @@ class Analyzer(
         i.copy(right = dedupRight(left, right))
       case e @ Except(left, right, _) if !e.duplicateResolved =>
         e.copy(right = dedupRight(left, right))
+
+      // OMNITABLE -- TRY THIS
+      case nj @ SDOrderedJoin(left, right, _, _, _, _) if !nj.duplicateResolved =>
+        nj.copy(right = dedupRight(left, right))
+
+
       // When resolve `SortOrder`s in Sort based on child, don't report errors as
       // we still have chance to resolve it based on its descendants
       case s @ Sort(ordering, global, child) if child.resolved && !s.resolved =>

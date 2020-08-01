@@ -43,6 +43,7 @@ public interface InputPartitionReader<T> extends Closeable {
    */
   boolean next() throws IOException;
 
+
   /**
    * Return the current record. This method should return same value until `next` is called.
    *

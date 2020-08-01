@@ -318,7 +318,9 @@ trait CheckAnalysis extends PredicateHelper {
             val msg = if (attrsWithSameName.nonEmpty) {
               val sameNames = attrsWithSameName.map(_.name).mkString(",")
               s"$msgForMissingAttributes Attribute(s) with the same name appear in the " +
-                s"operation: $sameNames. Please check if the right attribute(s) are used."
+                s"operation: $sameNames. Please check if the right attribute(s) are used." +
+              s"Resolver class ${resolver.getClass.getName}"
+
             } else {
               msgForMissingAttributes
             }

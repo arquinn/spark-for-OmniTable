@@ -20,6 +20,7 @@ package org.apache.spark.sql.execution
 import java.nio.charset.StandardCharsets
 import java.sql.{Date, Timestamp}
 
+import org.apache.spark.internal.Logging
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{AnalysisException, Row, SparkSession}
 import org.apache.spark.sql.catalyst.InternalRow
@@ -39,10 +40,12 @@ import org.apache.spark.util.Utils
  * While this is not a public class, we should avoid changing the function names for the sake of
  * changing them, because a lot of developers use the feature for debugging.
  */
-class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) {
+class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) extends Logging{
 
   // TODO: Move the planner an optimizer into here from SessionState.
   protected def planner = sparkSession.sessionState.planner
+
+  protected def steamdrillOpt = sparkSession.steamdrillOptimizer
 
   def assertAnalyzed(): Unit = analyzed
 
@@ -57,27 +60,67 @@ class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) {
     sparkSession.sessionState.analyzer.executeAndCheck(logical)
   }
 
-  lazy val withCachedData: LogicalPlan = {
+  def useCachedData(plan: LogicalPlan): LogicalPlan = {
     assertAnalyzed()
     assertSupported()
-    sparkSession.sharedState.cacheManager.useCachedData(analyzed)
+    sparkSession.sharedState.cacheManager.useCachedData(plan)
+  }
+  lazy val withCachedData: LogicalPlan = useCachedData(analyzed)
+
+  def optimizePlan(plan: LogicalPlan): LogicalPlan = {
+    sparkSession.sessionState.optimizer.execute(plan)
+  }
+  lazy val optimizedPlan: LogicalPlan = optimizePlan(withCachedData)
+
+  var finished: Boolean = false
+  var cachedNextPlan: LogicalPlan = null
+  def nextPlan: LogicalPlan = {
+    if (cachedNextPlan == null) {
+      val plan = useCachedData(optimizedPlan)
+      if (steamdrillOpt.nonEmpty) {
+        cachedNextPlan = steamdrillOpt.get.execute(plan)
+        if (plan.fastEquals(cachedNextPlan)) {
+          finished = true
+        }
+      }
+      else {
+        cachedNextPlan = plan
+      }
+    }
+    cachedNextPlan
   }
 
-  lazy val optimizedPlan: LogicalPlan = sparkSession.sessionState.optimizer.execute(withCachedData)
-
-  lazy val sparkPlan: SparkPlan = {
+  var cachedSparkPlan: SparkPlan = null
+  def sparkPlan: SparkPlan = {
     SparkSession.setActiveSession(sparkSession)
-    // TODO: We use next(), i.e. take the first plan returned by the planner, here for now,
-    //       but we will implement to choose the best plan.
-    planner.plan(ReturnAnswer(optimizedPlan)).next()
+    if (cachedSparkPlan == null) {
+      // TODO: We use next(), i.e. take the first plan returned by the planner, here for now,
+      //       but we will implement to choose the best plan.
+      cachedSparkPlan = planner.plan(ReturnAnswer(nextPlan)).next()
+    }
+    cachedSparkPlan
   }
 
   // executedPlan should not be used to initialize any SparkPlan. It should be
   // only used for execution.
-  lazy val executedPlan: SparkPlan = prepareForExecution(sparkPlan)
+  var cachedExecutedPlan: SparkPlan = null
+  def executedPlan: SparkPlan = {
+    if (cachedExecutedPlan == null) {
+      cachedExecutedPlan = prepareForExecution(sparkPlan)
+    }
+    cachedExecutedPlan
+  }
+
+  def clearCaches: Unit = {
+    cachedExecutedPlan = null
+    cachedNextPlan = null
+    cachedSparkPlan = null
+  }
 
   /** Internal version of the RDD. Avoids copies and has no schema */
-  lazy val toRdd: RDD[InternalRow] = executedPlan.execute()
+  lazy val toRdd: RDD[InternalRow] = {
+    executedPlan.execute()
+  }
 
   /**
    * Prepares a planned [[SparkPlan]] for execution by inserting shuffle operations and internal

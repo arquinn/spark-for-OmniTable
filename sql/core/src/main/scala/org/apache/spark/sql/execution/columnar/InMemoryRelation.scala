@@ -19,6 +19,7 @@ package org.apache.spark.sql.execution.columnar
 
 import org.apache.commons.lang3.StringUtils
 
+import org.apache.spark.internal.Logging
 import org.apache.spark.network.util.JavaUtils
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
@@ -48,7 +49,7 @@ case class CachedRDDBuilder(
     storageLevel: StorageLevel,
     @transient cachedPlan: SparkPlan,
     tableName: Option[String])(
-    @transient private var _cachedColumnBuffers: RDD[CachedBatch] = null) {
+    @transient private var _cachedColumnBuffers: RDD[CachedBatch] = null) extends Logging {
 
   val sizeInBytesStats: LongAccumulator = cachedPlan.sqlContext.sparkContext.longAccumulator
 
@@ -85,10 +86,18 @@ case class CachedRDDBuilder(
   }
 
   private def buildBuffers(): RDD[CachedBatch] = {
+
+    logDebug("InMemoryRelation buildBuffers()")
+
     val output = cachedPlan.output
+
+    logDebug(s"pre execute ${cachedPlan.toString}")
+
     val cached = cachedPlan.execute().mapPartitionsInternal { rowIterator =>
       new Iterator[CachedBatch] {
         def next(): CachedBatch = {
+
+          logDebug("Calling CachedBatch Iterator from InMemoryRelation")
           val columnBuilders = output.map { attribute =>
             ColumnBuilder(attribute.dataType, batchSize, attribute.name, useCompression)
           }.toArray
@@ -131,6 +140,8 @@ case class CachedRDDBuilder(
         def hasNext: Boolean = rowIterator.hasNext
       }
     }.persist(storageLevel)
+
+    logDebug(s"cached ${cachedPlan.toString}")
 
     cached.setName(
       tableName.map(n => s"In-memory table $n")

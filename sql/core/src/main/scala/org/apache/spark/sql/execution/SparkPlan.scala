@@ -452,3 +452,7 @@ trait BinaryExecNode extends SparkPlan {
 
   override final def children: Seq[SparkPlan] = Seq(left, right)
 }
+
+trait PushdownExecNode {
+  def pushdownMatch(row: InternalRow) : RDD[InternalRow]
+}

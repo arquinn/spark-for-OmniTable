@@ -303,8 +303,15 @@ abstract class SparkStrategies extends QueryPlanner[SparkPlan] {
         joins.BroadcastNestedLoopJoinExec(
           planLater(left), planLater(right), buildSide, joinType, condition) :: Nil
 
-      // --- Cases where this strategy does not apply ---------------------------------------------
 
+      // --- for the NextJoin Operator ------------------------------------------------------
+      case ExtractEquiOrderedJoinKeys(lKeys, rKeys, lOkey, rOkey, cond, left, right, jType)
+        if RowOrdering.isOrderable(lKeys) =>
+          joins.OrderedJoinExec(lKeys, rKeys, lOkey, rOkey, cond, jType,
+            planLater(left), planLater(right)) :: Nil
+
+
+      // --- Cases where this strategy does not apply ---------------------------------------------
       case _ => Nil
     }
   }

@@ -19,6 +19,7 @@ package org.apache.spark.sql.catalyst.optimizer
 
 import scala.collection.mutable
 
+import org.apache.spark.internal.Logging
 import org.apache.spark.sql.AnalysisException
 import org.apache.spark.sql.catalyst.analysis._
 import org.apache.spark.sql.catalyst.catalog.{InMemoryCatalog, SessionCatalog}
@@ -27,6 +28,7 @@ import org.apache.spark.sql.catalyst.expressions.aggregate._
 import org.apache.spark.sql.catalyst.plans._
 import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.catalyst.rules._
+import org.apache.spark.sql.catalyst.util.sideBySide
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
 import org.apache.spark.util.Utils
@@ -61,6 +63,7 @@ abstract class Optimizer(sessionCatalog: SessionCatalog)
         ReorderJoin,
         EliminateOuterJoin,
         PushPredicateThroughJoin,
+        PushPredicateThroughOrderedJoin,
         PushDownPredicate,
         LimitPushDown,
         ColumnPruning,
@@ -365,6 +368,24 @@ object RemoveRedundantAliases extends Rule[LogicalPlan] {
         })
         Join(newLeft, newRight, joinType, newCondition)
 
+
+      // OmniTable NextJoin needs to be treated similarly to a Join!
+      // We use a blacklist to prevent us from creating a
+      // situation in which this happens; the rule will only remove an alias if its child
+      // attribute is not on the black list.
+      case SDOrderedJoin(left, right, leftExpr, rightExpr, condition, t) =>
+        val newLeft = removeRedundantAliases(left, blacklist ++ right.outputSet)
+        val newRight = removeRedundantAliases(right, blacklist ++ newLeft.outputSet)
+        val mapping = AttributeMap(
+          createAttributeMapping(left, newLeft) ++
+            createAttributeMapping(right, newRight))
+        val newCondition = condition.map(_.transform {
+          case a: Attribute => mapping.getOrElse(a, a)
+        })
+        val newLeftExpr = leftExpr.map(le => mapping.getOrElse(le.asInstanceOf[Attribute], le))
+        val newRightExpr = rightExpr.map(re => mapping.getOrElse(re.asInstanceOf[Attribute], re))
+        SDOrderedJoin(newLeft, newRight, newLeftExpr, newRightExpr, newCondition, t)
+
       case _ =>
         // Remove redundant aliases in the subtree(s).
         val currentNextAttrPairs = mutable.Buffer.empty[(Attribute, Attribute)]
@@ -529,7 +550,7 @@ object PushProjectionThroughUnion extends Rule[LogicalPlan] with PredicateHelper
  *
  * p2 is usually inserted by this rule and useless, p1 could prune the columns anyway.
  */
-object ColumnPruning extends Rule[LogicalPlan] {
+object ColumnPruning extends Rule[LogicalPlan] with Logging {
   private def sameOutput(output1: Seq[Attribute], output2: Seq[Attribute]): Boolean =
     output1.size == output2.size &&
       output1.zip(output2).forall(pair => pair._1.semanticEquals(pair._2))
@@ -617,7 +638,8 @@ object ColumnPruning extends Rule[LogicalPlan] {
       val required = child.references ++ p.references
       if ((child.inputSet -- required).nonEmpty) {
         val newChildren = child.children.map(c => prunedChild(c, required))
-        p.copy(child = child.withNewChildren(newChildren))
+        val newone = p.copy(child = child.withNewChildren(newChildren))
+        newone
       } else {
         p
       }
@@ -945,129 +967,134 @@ object PruneFilters extends Rule[LogicalPlan] with PredicateHelper {
  *
  * This heuristic is valid assuming the expression evaluation cost is minimal.
  */
-object PushDownPredicate extends Rule[LogicalPlan] with PredicateHelper {
-  def apply(plan: LogicalPlan): LogicalPlan = plan transform {
-    // SPARK-13473: We can't push the predicate down when the underlying projection output non-
-    // deterministic field(s).  Non-deterministic expressions are essentially stateful. This
-    // implies that, for a given input row, the output are determined by the expression's initial
-    // state and all the input rows processed before. In another word, the order of input rows
-    // matters for non-deterministic expressions, while pushing down predicates changes the order.
-    // This also applies to Aggregate.
-    case Filter(condition, project @ Project(fields, grandChild))
-      if fields.forall(_.deterministic) && canPushThroughCondition(grandChild, condition) =>
+object PushDownPredicate extends Rule[LogicalPlan] with PredicateHelper with Logging{
+  def apply(plan: LogicalPlan): LogicalPlan = {
+    plan transform {
 
-      // Create a map of Aliases to their values from the child projection.
-      // e.g., 'SELECT a + b AS c, d ...' produces Map(c -> a + b).
-      val aliasMap = AttributeMap(fields.collect {
-        case a: Alias => (a.toAttribute, a.child)
-      })
+      // SPARK-13473: We can't push the predicate down when the underlying projection output non-
+      // deterministic field(s).  Non-deterministic expressions are essentially stateful. This
+      // implies that, for a given input row, the output are determined by the expression's initial
+      // state and all the input rows processed before. In another word, the order of input rows
+      // matters for non-deterministic expressions, while pushing down predicates changes the order.
+      // This also applies to Aggregate.
+      case Filter(condition, project@Project(fields, grandChild))
+        if fields.forall(_.deterministic) && canPushThroughCondition(grandChild, condition) =>
 
-      project.copy(child = Filter(replaceAlias(condition, aliasMap), grandChild))
+        // Create a map of Aliases to their values from the child projection.
+        // e.g., 'SELECT a + b AS c, d ...' produces Map(c -> a + b).
+        val aliasMap = AttributeMap(fields.collect {
+          case a: Alias => (a.toAttribute, a.child)
+        })
 
-    case filter @ Filter(condition, aggregate: Aggregate)
-      if aggregate.aggregateExpressions.forall(_.deterministic)
-        && aggregate.groupingExpressions.nonEmpty =>
-      // Find all the aliased expressions in the aggregate list that don't include any actual
-      // AggregateExpression, and create a map from the alias to the expression
-      val aliasMap = AttributeMap(aggregate.aggregateExpressions.collect {
-        case a: Alias if a.child.find(_.isInstanceOf[AggregateExpression]).isEmpty =>
-          (a.toAttribute, a.child)
-      })
+        project.copy(child = Filter(replaceAlias(condition, aliasMap), grandChild))
 
-      // For each filter, expand the alias and check if the filter can be evaluated using
-      // attributes produced by the aggregate operator's child operator.
-      val (candidates, nonDeterministic) =
+      case filter@Filter(condition, aggregate: Aggregate)
+        if aggregate.aggregateExpressions.forall(_.deterministic)
+          && aggregate.groupingExpressions.nonEmpty =>
+        // Find all the aliased expressions in the aggregate list that don't include any actual
+        // AggregateExpression, and create a map from the alias to the expression
+        val aliasMap = AttributeMap(aggregate.aggregateExpressions.collect {
+          case a: Alias if a.child.find(_.isInstanceOf[AggregateExpression]).isEmpty =>
+            (a.toAttribute, a.child)
+        })
+
+        // For each filter, expand the alias and check if the filter can be evaluated using
+        // attributes produced by the aggregate operator's child operator.
+        val (candidates, nonDeterministic) =
         splitConjunctivePredicates(condition).partition(_.deterministic)
 
-      val (pushDown, rest) = candidates.partition { cond =>
-        val replaced = replaceAlias(cond, aliasMap)
-        cond.references.nonEmpty && replaced.references.subsetOf(aggregate.child.outputSet)
-      }
-
-      val stayUp = rest ++ nonDeterministic
-
-      if (pushDown.nonEmpty) {
-        val pushDownPredicate = pushDown.reduce(And)
-        val replaced = replaceAlias(pushDownPredicate, aliasMap)
-        val newAggregate = aggregate.copy(child = Filter(replaced, aggregate.child))
-        // If there is no more filter to stay up, just eliminate the filter.
-        // Otherwise, create "Filter(stayUp) <- Aggregate <- Filter(pushDownPredicate)".
-        if (stayUp.isEmpty) newAggregate else Filter(stayUp.reduce(And), newAggregate)
-      } else {
-        filter
-      }
-
-    // Push [[Filter]] operators through [[Window]] operators. Parts of the predicate that can be
-    // pushed beneath must satisfy the following conditions:
-    // 1. All the expressions are part of window partitioning key. The expressions can be compound.
-    // 2. Deterministic.
-    // 3. Placed before any non-deterministic predicates.
-    case filter @ Filter(condition, w: Window)
-      if w.partitionSpec.forall(_.isInstanceOf[AttributeReference]) =>
-      val partitionAttrs = AttributeSet(w.partitionSpec.flatMap(_.references))
-
-      val (candidates, nonDeterministic) =
-        splitConjunctivePredicates(condition).partition(_.deterministic)
-
-      val (pushDown, rest) = candidates.partition { cond =>
-        cond.references.subsetOf(partitionAttrs)
-      }
-
-      val stayUp = rest ++ nonDeterministic
-
-      if (pushDown.nonEmpty) {
-        val pushDownPredicate = pushDown.reduce(And)
-        val newWindow = w.copy(child = Filter(pushDownPredicate, w.child))
-        if (stayUp.isEmpty) newWindow else Filter(stayUp.reduce(And), newWindow)
-      } else {
-        filter
-      }
-
-    case filter @ Filter(condition, union: Union) =>
-      // Union could change the rows, so non-deterministic predicate can't be pushed down
-      val (pushDown, stayUp) = splitConjunctivePredicates(condition).partition(_.deterministic)
-
-      if (pushDown.nonEmpty) {
-        val pushDownCond = pushDown.reduceLeft(And)
-        val output = union.output
-        val newGrandChildren = union.children.map { grandchild =>
-          val newCond = pushDownCond transform {
-            case e if output.exists(_.semanticEquals(e)) =>
-              grandchild.output(output.indexWhere(_.semanticEquals(e)))
-          }
-          assert(newCond.references.subsetOf(grandchild.outputSet))
-          Filter(newCond, grandchild)
+        val (pushDown, rest) = candidates.partition { cond =>
+          val replaced = replaceAlias(cond, aliasMap)
+          cond.references.nonEmpty && replaced.references.subsetOf(aggregate.child.outputSet)
         }
-        val newUnion = union.withNewChildren(newGrandChildren)
-        if (stayUp.nonEmpty) {
-          Filter(stayUp.reduceLeft(And), newUnion)
+
+        val stayUp = rest ++ nonDeterministic
+
+        if (pushDown.nonEmpty) {
+          val pushDownPredicate = pushDown.reduce(And)
+          val replaced = replaceAlias(pushDownPredicate, aliasMap)
+          val newAggregate = aggregate.copy(child = Filter(replaced, aggregate.child))
+          // If there is no more filter to stay up, just eliminate the filter.
+          // Otherwise, create "Filter(stayUp) <- Aggregate <- Filter(pushDownPredicate)".
+          if (stayUp.isEmpty) newAggregate else Filter(stayUp.reduce(And), newAggregate)
         } else {
-          newUnion
+          filter
         }
-      } else {
-        filter
-      }
 
-    case filter @ Filter(condition, watermark: EventTimeWatermark) =>
-      val (pushDown, stayUp) = splitConjunctivePredicates(condition).partition { p =>
-        p.deterministic && !p.references.contains(watermark.eventTime)
-      }
+      // Push [[Filter]] operators through [[Window]] operators. Parts of the predicate that can be
+      // pushed beneath must satisfy the following conditions:
+      // 1. All the expressions are part of window partitioning key. The expressions can be
+      // compound.
+      // 2. Deterministic.
+      // 3. Placed before any non-deterministic predicates.
+      case filter@Filter(condition, w: Window)
+        if w.partitionSpec.forall(_.isInstanceOf[AttributeReference]) =>
+        val partitionAttrs = AttributeSet(w.partitionSpec.flatMap(_.references))
 
-      if (pushDown.nonEmpty) {
-        val pushDownPredicate = pushDown.reduceLeft(And)
-        val newWatermark = watermark.copy(child = Filter(pushDownPredicate, watermark.child))
-        // If there is no more filter to stay up, just eliminate the filter.
-        // Otherwise, create "Filter(stayUp) <- watermark <- Filter(pushDownPredicate)".
-        if (stayUp.isEmpty) newWatermark else Filter(stayUp.reduceLeft(And), newWatermark)
-      } else {
-        filter
-      }
+        val (candidates, nonDeterministic) =
+          splitConjunctivePredicates(condition).partition(_.deterministic)
 
-    case filter @ Filter(_, u: UnaryNode)
+        val (pushDown, rest) = candidates.partition { cond =>
+          cond.references.subsetOf(partitionAttrs)
+        }
+
+        val stayUp = rest ++ nonDeterministic
+
+        if (pushDown.nonEmpty) {
+          val pushDownPredicate = pushDown.reduce(And)
+          val newWindow = w.copy(child = Filter(pushDownPredicate, w.child))
+          if (stayUp.isEmpty) newWindow else Filter(stayUp.reduce(And), newWindow)
+        } else {
+          filter
+        }
+
+      case filter@Filter(condition, union: Union) =>
+
+        // Union could change the rows, so non-deterministic predicate can't be pushed down
+        val (pushDown, stayUp) = splitConjunctivePredicates(condition).partition(_.deterministic)
+
+        if (pushDown.nonEmpty) {
+          val pushDownCond = pushDown.reduceLeft(And)
+          val output = union.output
+          val newGrandChildren = union.children.map { grandchild =>
+            val newCond = pushDownCond transform {
+              case e if output.exists(_.semanticEquals(e)) =>
+                grandchild.output(output.indexWhere(_.semanticEquals(e)))
+            }
+            assert(newCond.references.subsetOf(grandchild.outputSet))
+            Filter(newCond, grandchild)
+          }
+          val newUnion = union.withNewChildren(newGrandChildren)
+          if (stayUp.nonEmpty) {
+            Filter(stayUp.reduceLeft(And), newUnion)
+          } else {
+            newUnion
+          }
+        } else {
+          filter
+        }
+
+      case filter@Filter(condition, watermark: EventTimeWatermark) =>
+        val (pushDown, stayUp) = splitConjunctivePredicates(condition).partition { p =>
+          p.deterministic && !p.references.contains(watermark.eventTime)
+        }
+
+        if (pushDown.nonEmpty) {
+          val pushDownPredicate = pushDown.reduceLeft(And)
+          val newWatermark = watermark.copy(child = Filter(pushDownPredicate, watermark.child))
+          // If there is no more filter to stay up, just eliminate the filter.
+          // Otherwise, create "Filter(stayUp) <- watermark <- Filter(pushDownPredicate)".
+          if (stayUp.isEmpty) newWatermark else Filter(stayUp.reduceLeft(And), newWatermark)
+        } else {
+          filter
+        }
+
+      case filter@Filter(_, u: UnaryNode)
         if canPushThrough(u) && u.expressions.forall(_.deterministic) =>
-      pushDownPredicate(filter, u.child) { predicate =>
-        u.withNewChildren(Seq(Filter(predicate, u.child)))
-      }
+        pushDownPredicate(filter, u.child) { predicate =>
+          u.withNewChildren(Seq(Filter(predicate, u.child)))
+        }
+    }
   }
 
   private def canPushThrough(p: UnaryNode): Boolean = p match {
@@ -1241,6 +1268,173 @@ object PushPredicateThroughJoin extends Rule[LogicalPlan] with PredicateHelper {
       }
   }
 }
+
+
+/**
+ * Pushes down [[Filter]] opeartors when dealing with a NextJoin operator (why this
+ * has to be separate... complain to spark devs.)
+ */
+object PushPredicateThroughOrderedJoin extends Rule[LogicalPlan] with PredicateHelper with Logging {
+  /**
+   * Splits join condition expressions or filter predicates (on a given join's output) into three
+   * categories based on the attributes required to evaluate them. Note that we explicitly exclude
+   * non-deterministic (i.e., stateful) condition expressions in canEvaluateInLeft or
+   * canEvaluateInRight to prevent pushing these predicates on either side of the join.
+   *
+   * @return (canEvaluateInLeft, canEvaluateInRight, haveToEvaluateInBoth)
+   */
+  private def split(condition: Seq[Expression], left: LogicalPlan, right: LogicalPlan) = {
+    val (candidates, nonDet) = condition.partition(c => {c.deterministic && c != Literal(true)})
+    val (leftExprs, rest) = candidates.partition(_.references.subsetOf(left.outputSet))
+    val (rightExprs, common) = rest.partition(_.references.subsetOf(right.outputSet))
+
+    (leftExprs, rightExprs, common ++ nonDet)
+  }
+
+  private def parseCondition(cond: Expression, filters: Seq[Expression]): Seq[Expression] = {
+    cond match {
+      case _ @ Or(left, right) =>
+        val lList = parseCondition(left, filters)
+        val rList = parseCondition(right, filters)
+        lList.flatMap(l => rList.map(Or(l, _)))
+
+      case _ @ And(left, right) =>
+        val lList = parseCondition(left, filters)
+        val rList = parseCondition(right, filters)
+        lList.flatMap(l => rList.map(And(l, _)))
+
+      case _ @ EqualTo(left, right) =>
+        // determine if the left or right can be substituted into any filters
+        filters.flatMap( filter => {
+          val childMap = filter.children.flatMap(child => {
+            if (child == left) {
+              Some((child, right))
+            }
+            else if (child == right) {
+              Some((child, left))
+            }
+            else {
+              None
+            }
+          })
+
+          // now, we know if children map at all.
+          childMap.map( tuple => {
+            val n = filter.mapChildren(e => {
+              if (e == tuple._1) {
+                tuple._2
+              }
+              else {
+                e
+              }
+            })
+            n
+          })
+        })
+      case _ =>
+        Nil
+    }
+  }
+
+  private def containsNullComp(expr: Expression): Boolean = {
+    expr match {
+      case IsNull(_) =>
+        true
+      case IsNotNull(_) =>
+        true
+      case _ =>
+        if (expr.children.nonEmpty) {
+          expr.children.map(containsNullComp(_)).exists(identity)
+        } else {
+          false
+        }
+    }
+  }
+
+
+  private def createExtraFilters(filters: Seq[Expression],
+                                 conditions: Seq[Expression] ): Seq[Expression] = {
+
+    val (candidates, _) = filters.partition(_.deterministic)
+    conditions.flatMap( cond => parseCondition(cond, candidates))
+  }
+
+
+  def apply(plan: LogicalPlan): LogicalPlan = plan transform {
+
+    // push the where condition down into join filter
+    case f @ Filter(filterCondition, SDOrderedJoin(left, right, leftExpr, rightExpr, jc, t)) =>
+      val extraFilters = createExtraFilters(splitConjunctivePredicates(filterCondition),
+        jc.map(splitConjunctivePredicates).getOrElse(Nil))
+
+      val (leftConds, rightConds, commonConds) =
+        split(splitConjunctivePredicates(filterCondition), left, right)
+      val (extraLeft, extraRight, extraCommon) = split(extraFilters, left, right)
+
+      t match {
+
+        case LeftStackOJT =>
+
+          // push down the single side `where` condition into respective sides
+
+          val newLeft =
+            (leftConds ++ extraLeft).reduceLeftOption(And).map(Filter(_, left)).getOrElse(left)
+
+          // figure out which (if any) of the right conditionals we can push:
+          val rightPushable =
+            (extraRight ++ rightConds).filterNot(containsNullComp(_))
+          val rightUnpushable = (rightConds).filter(containsNullComp(_))
+
+          logInfo(
+            s"""pushable: ${rightPushable.mkString(", ")}
+               |unpushable: ${rightUnpushable.mkString(", ")}
+             """.stripMargin)
+
+          val newRight =
+            rightPushable.reduceLeftOption(And).map(Filter(_, right)).getOrElse(right)
+
+          val rtn = SDOrderedJoin(newLeft, newRight, leftExpr, rightExpr, jc, t)
+          rightUnpushable.reduceLeftOption(And).map(Filter(_, rtn)).getOrElse(rtn)
+
+        case _ =>
+          // push down the single side `where` condition into respective sides
+          val newLeft =
+            (leftConds ++ extraLeft).reduceLeftOption(And).map(Filter(_, left)).getOrElse(left)
+          val newRight =
+            (rightConds ++ extraRight).reduceLeftOption(And).map(Filter(_, right)).getOrElse(right)
+          val (newJoinConds, others) = (commonConds ++ extraCommon).partition(canEvaluateWithinJoin)
+          val newCond = (newJoinConds ++ jc).reduceLeftOption(And)
+
+          var rtn: LogicalPlan = SDOrderedJoin(newLeft, newRight, leftExpr, rightExpr, newCond, t)
+          if (others.nonEmpty) {
+            rtn = Filter(others.reduceLeft(And), rtn)
+          }
+
+          logInfo(s"filter ${sideBySide(f.treeString, rtn.treeString).mkString("\n")}")
+          rtn
+      }
+
+    // push down the join filter into sub query scanning if applicable
+    case j @ SDOrderedJoin(left, right, leftExpr, rightExpr, joinCondition, t) =>
+      val (leftJoinConditions, rightJoinConditions, commonJoinCondition) =
+        split(joinCondition.map(splitConjunctivePredicates).getOrElse(Nil), left, right)
+
+
+      // push down the single side only join filter for both sides sub queries
+      val newLeft = leftJoinConditions.
+        reduceLeftOption(And).map(Filter(_, left)).getOrElse(left)
+      val newRight = rightJoinConditions.
+        reduceLeftOption(And).map(Filter(_, right)).getOrElse(right)
+      val newJoinCond = commonJoinCondition.reduceLeftOption(And)
+
+      val newJoin = SDOrderedJoin(newLeft, newRight, leftExpr, rightExpr, newJoinCond, t)
+      logInfo(s"nxtJoin\n ${sideBySide(j.treeString, newJoin.treeString).mkString("\n")}")
+      newJoin
+  }
+}
+
+
+
 
 /**
  * Combines two adjacent [[Limit]] operators into one, merging the

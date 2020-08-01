@@ -1,0 +1,5 @@
+spark.driver.userClassPathFirst=true
+spark.executor.userClassPathFirst=true
+
+spark.driver.memory 2048m
+spark.executor.memory 2048m

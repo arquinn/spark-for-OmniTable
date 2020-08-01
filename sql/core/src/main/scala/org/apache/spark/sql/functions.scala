@@ -4243,4 +4243,48 @@ object functions {
   def callUDF(udfName: String, cols: Column*): Column = withExpr {
     UnresolvedFunction(udfName, cols.map(_.expr), isDistinct = false)
   }
+
+  /**
+   * Get the value from `e` from the Column with the min value of `s`.
+   * New Function builtin for the Omnitable
+   *
+   * @param s The column used to select the minimum
+   * @param e The column that is selected
+   *
+   * @group agg_funcs
+   * @since 2.0.0
+   */
+  def minRowVal(s: Column, e : Column) : Column = withAggregateFunction { MinRowVal(s.expr, e.expr)}
+
+  /**
+   * Get the value from `e` from the Column with the min value of `s`.
+   * New Function builtin for the Omnitable
+   *
+   * @param s The column used to select the minimum
+   * @param e The column that is selected
+   *
+   * @group agg_funcs
+   * @since 2.0.0
+   */
+  def minRowVal(s: String, e : String) : Column = {
+    withAggregateFunction { MinRowVal(Column(s).expr, Column(e).expr)}
+  }
+
+  /**
+   * Get the value from `e` from the Column with the min value of `s`.
+   * New Function builtin for the Omnitable
+   *
+   * @param s The column used to select the minimum
+   * @param e The column that is selected
+   *
+   * @group agg_funcs
+   * @since 2.0.0
+   */
+  def minRowVal(s: Column, e : String) : Column = {
+    withAggregateFunction { MinRowVal(s.expr, Column(e).expr)}
+  }
+
+
+  // OMNITABLE
+
 }
