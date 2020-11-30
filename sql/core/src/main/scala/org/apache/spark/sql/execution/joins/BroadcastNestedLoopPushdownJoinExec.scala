@@ -66,7 +66,7 @@ case class BroadcastNestedLoopPushdownJoinExec(
     if (condition.isDefined) {
       newPredicate(condition.get, streamedPlan.output ++ buildPlan.output).eval _
     } else {
-      (r: InternalRow) => true
+      _ : InternalRow => true
     }
   }
 
@@ -75,23 +75,15 @@ case class BroadcastNestedLoopPushdownJoinExec(
 
     val broadcastRelation = buildPlan.executeBroadcast[Array[InternalRow]]()
     val streamPush = streamedPlan.asInstanceOf[PushdownExecNode]
-    val joinedRow = new JoinedRow
 
+    // Apply filter here (in case there was an issue applying it in the pushdown)
+    val resultRdd = streamPush.pushdownMatch(broadcastRelation.value)
+      .mapPartitionsInternal(_.filter(boundCondition))
 
-    // can we require some way of identifying the row that was matched? 
-
-    val resultRdd = broadcastRelation.value.iterator.map(row => {
-      logDebug("A relevant buildPlan row is: " + row)
-      streamPush.pushdownMatch(row).mapPartitionsInternal(
-        _.map(srow => {
-          logTrace("merging " + srow + " " + row)
-          joinedRow(srow, row)})
-         .filter(boundCondition))})
-      .reduceOption(_ union _).getOrElse(new EmptyRDD[InternalRow](sparkContext))
-
+    // not 100% sure why I need the numOutputRows (AFAIK it isn't used?)
     val numOutputRows = longMetric("numOutputRows")
-
     resultRdd.mapPartitionsWithIndexInternal { (index, iter) =>
+
       val resultProj = UnsafeProjection.create(
         output, (streamedPlan.output ++ buildPlan.output).map(_.withNullability(true)))
 

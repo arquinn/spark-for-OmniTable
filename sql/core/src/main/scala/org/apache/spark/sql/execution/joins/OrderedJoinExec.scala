@@ -23,7 +23,7 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Ascending, Attribute, Expression, GenericInternalRow, JoinedRow, Projection, SortOrder, UnsafeProjection}
-import org.apache.spark.sql.catalyst.plans.{LeftStackOJT, NextOJT, OrderedJoinType, StackLike}
+import org.apache.spark.sql.catalyst.plans.{LeftNextOJT, LeftStackOJT, NextOJT, OrderedJoinType}
 import org.apache.spark.sql.catalyst.plans.physical.{Distribution, HashClusteredDistribution, Partitioning, PartitioningCollection}
 import org.apache.spark.sql.execution.{BinaryExecNode, RowIterator, SparkPlan}
 import org.apache.spark.sql.execution.metric.SQLMetrics
@@ -153,6 +153,15 @@ case class OrderedJoinExec(leftEqiKeys: Seq[Expression],
             orderKeyOrdering,
             RowIterator.fromScala(leftIter),
             RowIterator.fromScala(rightIter))
+          case LeftNextOJT => new LeftNextJoinScanner(
+            createLeftKeyGenerator(),
+            createRightKeyGenerator(),
+            keyOrdering,
+            createLeftOrderKeyGenerator(),
+            createRightOrderKeyGenerator(),
+            orderKeyOrdering,
+            RowIterator.fromScala(leftIter),
+            RowIterator.fromScala(rightIter))
           case LeftStackOJT => new LeftStackJoinScanner(
             createLeftKeyGenerator(),
             createRightKeyGenerator(),
@@ -178,7 +187,7 @@ case class OrderedJoinExec(leftEqiKeys: Seq[Expression],
         private[this] val nulls = new GenericInternalRow(right.output.size)
 
         override def advanceNext(): Boolean = {
-          logError("advanceNext called from OrderedJoinExec I guess?")
+          // logError("advanceNext called from OrderedJoinExec I guess?")
           val (currentLeftRow, currentRightRow) = scanner.findJoinRow()
           if (currentLeftRow != null) {
             numOutputRows += 1
@@ -188,7 +197,9 @@ case class OrderedJoinExec(leftEqiKeys: Seq[Expression],
               joinRow(currentLeftRow, nulls)
             }
           }
-          return currentLeftRow != null;
+          // logInfo(s"""advanceNext returning ${currentLeftRow != null}, row is ${joinRow}""")
+
+          currentLeftRow != null;
         }
         override def getRow: InternalRow = joinType match {
           case _ => resultProj (joinRow)
@@ -338,6 +349,71 @@ private[joins] class NextJoinScanner(lKeyG: Projection,
         leftRow = null
         rightRow = null
         (null, null)
+      } else {
+        (leftRow, rightRow)
+      }
+    }
+  }
+}
+
+
+
+private[joins] class LeftNextJoinScanner(lKeyG: Projection,
+                                     rKeyG: Projection,
+                                     eqiKeyO: Ordering[InternalRow],
+                                     lOKeyGen : Projection,
+                                     rOKeyGen: Projection,
+                                     oKeyOrder: Ordering[InternalRow],
+                                     lIter: RowIterator,
+                                     rIter: RowIterator)
+  extends OrderedJoinScanner(lKeyG, rKeyG, eqiKeyO, lOKeyGen, rOKeyGen, oKeyOrder, lIter, rIter) {
+  /**
+   * Advances both input iterators, stopping when we have found rows with matching join keys.
+   * @return left and right internal rows for a match, or (null, null) if no match exists
+   */
+
+  // we need a status variable to tell us if we're draining left
+  var drainLeft = false
+  override  def findJoinRow() : (InternalRow, InternalRow) = {
+    advancedLeft()
+
+    if (!drainLeft) {
+      advancedRight()
+    }
+
+    if (leftRow == null) {
+      // We have consumed the entire streamed iterator, so there can be no more matches.
+      rightRow = null
+      (null, null)
+    } else if (rightRow == null) {
+      // There are no more rows to read from the buffered iterator, so return the left
+      drainLeft = true
+      (leftRow, null)
+    } else {
+
+      var comp = 0
+      drainLeft = false
+      do {
+        // left and right are ordered first by equality -- no match means no ordering match either
+        comp = eqiKeyO.compare(leftRowKey, rightRowKey)
+        // logInfo(s"""comp between ${leftRow.toString} and ${rightRow.toString} is ${comp}""")
+        if (comp > 0) {
+          advancedRight()
+        }
+        else if (comp == 0) {
+          val oComp = oKeyOrder.compare(leftOrderKey, rightOrderKey)
+          if (oComp >= 0) {
+            comp = 1
+            advancedRight()
+          }
+        }
+        else {
+          // comp < 0 -> means that the right is done with matches for this section of lefts
+          drainLeft = true
+        }
+      } while (leftRow != null && rightRow != null && comp > 0)
+      if (drainLeft) {
+        (leftRow, null)
       } else {
         (leftRow, rightRow)
       }

@@ -22,6 +22,8 @@ import java.util.Locale
 object OrderedJoinType {
   def apply(typ: String): OrderedJoinType = typ.toLowerCase(Locale.ROOT).replace("_", "") match {
     case "next" => NextOJT
+    case "leftnext" => LeftNextOJT
+
     case "prev" => PrevOJT
     case "stack" | "innerstack" => InnerStackOJT
     case "leftstack" => LeftStackOJT
@@ -44,6 +46,9 @@ sealed abstract class OrderedJoinType {
 case object NextOJT extends OrderedJoinType {
   override def sql: String = "NEXT"
 }
+case object LeftNextOJT extends OrderedJoinType {
+  override def sql: String = "LEFT NEXT"
+}
 
 case object PrevOJT extends OrderedJoinType {
   override def sql: String = "PREV"
@@ -56,6 +61,7 @@ sealed abstract class StackLike extends OrderedJoinType {
 case object InnerStackOJT extends StackLike {
   override def sql: String = "INNER STACK"
 }
+
 
 case object LeftStackOJT extends StackLike {
   override def sql: String = "LEFT STACK"

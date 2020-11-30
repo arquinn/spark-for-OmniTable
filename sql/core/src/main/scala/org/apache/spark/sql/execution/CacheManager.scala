@@ -105,32 +105,6 @@ class CacheManager extends Logging {
   }
 
   /**
-   * Caches the data produced by the logical representation of the given [[Dataset]].
-   * Unlike `RDD.cache()`, the default storage level is set to be `MEMORY_AND_DISK` because
-   * recomputing the in-memory columnar representation of the underlying table is expensive.
-   */
-  def cacheNextPlan(
-      qe: QueryExecution,
-      sparkSession: SparkSession,
-      tableName: Option[String] = None,
-      storageLevel: StorageLevel = MEMORY_AND_DISK): Unit = writeLock {
-    val planToCache = qe.nextPlan
-    if (lookupCachedData(planToCache).nonEmpty) {
-      logWarning("Asked to cache already cached data.")
-    } else {
-      val inMemoryRelation = InMemoryRelation(
-        sparkSession.sessionState.conf.useCompression,
-        sparkSession.sessionState.conf.columnBatchSize, storageLevel,
-        sparkSession.sessionState.executePlan(planToCache).executedPlan,
-        // qe.executedPlan,
-        tableName,
-        planToCache)
-      cachedData.add(CachedData(planToCache, inMemoryRelation))
-      logDebug(s"Add  ${planToCache.treeString} to cache")
-    }
-  }
-
-  /**
    * Un-cache the given plan or all the cache entries that refer to the given plan.
    * @param query     The [[Dataset]] to be un-cached.
    * @param cascade   If true, un-cache all the cache entries that refer to the given

@@ -3381,18 +3381,7 @@ class Dataset[T] private[sql](
       }
       val start = System.nanoTime()
       val result = SQLExecution.withNewExecutionId(sparkSession, qe) {
-        var execPlan = qe.executedPlan
-        while(!qe.finished) {
-          sparkSession.sharedState.cacheManager.cacheNextPlan(qe, sparkSession)
-          qe.clearCaches
-          execPlan = qe.executedPlan // as far as I can tell... these are NEVER used?
-
-          // should action occur multiple times here??
-          // break out of infinite loop for now
-          // qe.finished = true
-        }
-
-        action(execPlan)
+        action(qe.executedPlan)
       }
       val end = System.nanoTime()
       sparkSession.listenerManager.onSuccess(name, qe, end - start)

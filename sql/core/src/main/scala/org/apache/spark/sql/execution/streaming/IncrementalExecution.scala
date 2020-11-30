@@ -74,7 +74,7 @@ class IncrementalExecution(
    * with the desired literal
    */
   override lazy val optimizedPlan: LogicalPlan = {
-    sparkSession.sessionState.optimizer.execute(useCachedData(analyzed)) transformAllExpressions {
+    sparkSession.sessionState.optimizer.execute(withCachedData) transformAllExpressions {
       case ts @ CurrentBatchTimestamp(timestamp, _, _) =>
         logInfo(s"Current batch timestamp = $timestamp")
         ts.toLiteral

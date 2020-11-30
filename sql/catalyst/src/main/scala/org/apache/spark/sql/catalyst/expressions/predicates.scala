@@ -56,7 +56,7 @@ trait Predicate extends Expression {
 
 
 trait PredicateHelper {
-  protected def splitConjunctivePredicates(condition: Expression): Seq[Expression] = {
+  def splitConjunctivePredicates(condition: Expression): Seq[Expression] = {
     condition match {
       case And(cond1, cond2) =>
         splitConjunctivePredicates(cond1) ++ splitConjunctivePredicates(cond2)
@@ -64,7 +64,7 @@ trait PredicateHelper {
     }
   }
 
-  protected def splitDisjunctivePredicates(condition: Expression): Seq[Expression] = {
+  def splitDisjunctivePredicates(condition: Expression): Seq[Expression] = {
     condition match {
       case Or(cond1, cond2) =>
         splitDisjunctivePredicates(cond1) ++ splitDisjunctivePredicates(cond2)
@@ -73,7 +73,7 @@ trait PredicateHelper {
   }
 
   // Substitute any known alias from a map.
-  protected def replaceAlias(
+  def replaceAlias(
       condition: Expression,
       aliases: AttributeMap[Expression]): Expression = {
     // Use transformUp to prevent infinite recursion when the replacement expression

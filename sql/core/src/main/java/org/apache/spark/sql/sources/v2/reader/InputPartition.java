@@ -62,7 +62,7 @@ public interface InputPartition<T> extends Serializable {
    */
   InputPartitionReader<T> createPartitionReader();
 
-  default InputPartitionReader<T> createPushdownPartitionReader(InternalRow row) {
+  default InputPartitionReader<T> createPushdownPartitionReader(Iterator<InternalRow> rows) {
     return createPartitionReader();
   }
 }

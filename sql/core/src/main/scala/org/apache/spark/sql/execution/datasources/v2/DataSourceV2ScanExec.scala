@@ -125,10 +125,10 @@ case class DataSourceV2ScanExec(
     }
   }
 
-  override def pushdownMatch(row: InternalRow) : RDD[InternalRow] = {
+  override def pushdownMatch(rows: Array[InternalRow]) : RDD[InternalRow] = {
     reader match {
       case _: SupportsJoinPushdown =>
-        new DataSourcePushdownRDD(sparkContext, partitions, row)
+        new DataSourcePushdownRDD(sparkContext, partitions, rows)
       case _ =>
         inputRDD
     }

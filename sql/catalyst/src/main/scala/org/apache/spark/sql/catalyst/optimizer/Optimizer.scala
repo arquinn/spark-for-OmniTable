@@ -60,7 +60,7 @@ abstract class Optimizer(sessionCatalog: SessionCatalog)
       Seq(
         // Operator push down
         PushProjectionThroughUnion,
-        ReorderJoin,
+        // ReorderJoin,
         EliminateOuterJoin,
         PushPredicateThroughJoin,
         PushPredicateThroughOrderedJoin,

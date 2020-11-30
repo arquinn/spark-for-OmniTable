@@ -987,7 +987,7 @@ case class SDOrderedJoin(
   override def output: Seq[Attribute] = {
     joinType match {
       // the only special case that I support is left antijoin
-      case LeftStackOJT =>
+      case LeftNextOJT | LeftStackOJT =>
         left.output ++ right.output.map(_.withNullability(true))
       case _ =>
         left.output ++ right.output
@@ -1013,4 +1013,100 @@ case class SDOrderedJoin(
     duplicateResolved &&
     orderCond.map(_.resolved).forall(identity) &&
     extraConds.forall(_.dataType == BooleanType)
+}
+
+
+// Steamdrill SHIT
+
+
+case class DatasourceV2Pushable(projectList: Seq[NamedExpression],
+                                child: LogicalPlan,
+                                matchable: String)
+  extends OrderPreservingUnaryNode {
+  override def output: Seq[Attribute] = projectList.map(_.toAttribute)
+  override def maxRows: Option[Long] = child.maxRows
+
+  override lazy val resolved: Boolean = {
+    val hasSpecialExpressions = projectList.exists ( _.collect {
+      case agg: AggregateExpression => agg
+      case generator: Generator => generator
+      case window: WindowExpression => window
+    }.nonEmpty
+    )
+
+    !expressions.exists(!_.resolved) && childrenResolved && !hasSpecialExpressions
+  }
+
+  override def validConstraints: Set[Expression] =
+    child.constraints.union(getAliasedConstraints(projectList))
+}
+
+// might want 'pushable output' in the long run?
+case class JoinWithPushable(
+                 left: LogicalPlan,
+                 right: LogicalPlan,
+                 joinType: JoinType,
+                 condition: Option[Expression],
+                 pushableCondition: Option[Expression])
+  extends BinaryNode with PredicateHelper {
+
+  override def output: Seq[Attribute] = {
+    joinType match {
+      case j: ExistenceJoin =>
+        left.output :+ j.exists
+      case LeftExistence(_) =>
+        left.output
+      case LeftOuter =>
+        left.output ++ right.output.map(_.withNullability(true))
+      case RightOuter =>
+        left.output.map(_.withNullability(true)) ++ right.output
+      case FullOuter =>
+        left.output.map(_.withNullability(true)) ++ right.output.map(_.withNullability(true))
+      case _ =>
+        left.output ++ right.output
+    }
+  }
+
+  override protected def validConstraints: Set[Expression] = {
+    joinType match {
+      case _: InnerLike if condition.isDefined =>
+        left.constraints
+          .union(right.constraints)
+          .union(splitConjunctivePredicates(condition.get).toSet)
+      case LeftSemi if condition.isDefined =>
+        left.constraints
+          .union(splitConjunctivePredicates(condition.get).toSet)
+      case j: ExistenceJoin =>
+        left.constraints
+      case _: InnerLike =>
+        left.constraints.union(right.constraints)
+      case LeftExistence(_) =>
+        left.constraints
+      case LeftOuter =>
+        left.constraints
+      case RightOuter =>
+        right.constraints
+      case FullOuter =>
+        Set.empty[Expression]
+    }
+  }
+
+  def duplicateResolved: Boolean = left.outputSet.intersect(right.outputSet).isEmpty
+
+  // Joins are only resolved if they don't introduce ambiguous expression ids.
+  // NaturalJoin should be ready for resolution only if everything else is resolved here
+  lazy val resolvedExceptNatural: Boolean = {
+    childrenResolved &&
+      expressions.forall(_.resolved) &&
+      duplicateResolved &&
+      condition.forall(_.dataType == BooleanType)
+  }
+
+  // if not a natural join, use `resolvedExceptNatural`. if it is a natural join or
+  // using join, we still need to eliminate natural or using before we mark it resolved.
+  override lazy val resolved: Boolean = joinType match {
+    case NaturalJoin(_) => false
+    case UsingJoin(_, _) => false
+    case _ => resolvedExceptNatural
+  }
 }

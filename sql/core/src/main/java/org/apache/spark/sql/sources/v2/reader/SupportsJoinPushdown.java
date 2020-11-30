@@ -17,7 +17,6 @@
 
 package org.apache.spark.sql.sources.v2.reader;
 
-import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.catalyst.expressions.Attribute;
 import org.apache.spark.sql.catalyst.expressions.Expression;
 

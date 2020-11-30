@@ -72,7 +72,7 @@ class DataSourceRDD[T: ClassTag](
 class DataSourcePushdownRDD[T: ClassTag](
     sc: SparkContext,
     @transient private val inputPartitions: Seq[InputPartition[T]],
-    row: InternalRow)
+    rows: Array[InternalRow])
   extends RDD[T](sc, Nil) {
 
   override protected def getPartitions: Array[Partition] = {
@@ -83,7 +83,7 @@ class DataSourcePushdownRDD[T: ClassTag](
 
   override def compute(split: Partition, context: TaskContext): Iterator[T] = {
     val reader = split.asInstanceOf[DataSourceRDDPartition[T]].inputPartition
-      .createPushdownPartitionReader(row)
+      .createPushdownPartitionReader(rows.iterator.asJava)
 
     context.addTaskCompletionListener[Unit](_ => reader.close())
     val iter = new Iterator[T] {

@@ -891,8 +891,8 @@ class Analyzer(
                               .orElse(resolveLiteralFunction(nameParts, u, q))
                               .getOrElse(u)
             }
-          logDebug(s"Resolved $u to $result within lp ${q.toString}" +
-            s" and resolver ${resolver.toString}")
+          // logDebug(s"Resolved $u to $result within lp ${q.toString}" +
+            // s" and resolver ${resolver.toString}")
           result
         case UnresolvedExtractValue(child, fieldExpr) if child.resolved =>
           ExtractValue(child, fieldExpr, resolver)

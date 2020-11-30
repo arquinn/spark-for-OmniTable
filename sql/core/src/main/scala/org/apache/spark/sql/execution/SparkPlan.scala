@@ -454,5 +454,5 @@ trait BinaryExecNode extends SparkPlan {
 }
 
 trait PushdownExecNode {
-  def pushdownMatch(row: InternalRow) : RDD[InternalRow]
+  def pushdownMatch(row: Array[InternalRow]) : RDD[InternalRow]
 }

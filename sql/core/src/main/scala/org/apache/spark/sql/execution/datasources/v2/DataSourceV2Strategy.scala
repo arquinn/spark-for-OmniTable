@@ -20,14 +20,14 @@
   import scala.collection.mutable
 
   import org.apache.spark.sql.Strategy
-  import org.apache.spark.sql.catalyst.expressions.{And, AttributeReference, AttributeSet, Expression, PredicateHelper}
-  import org.apache.spark.sql.catalyst.planning.PhysicalOperation
-  import org.apache.spark.sql.catalyst.plans.InnerLike
-  import org.apache.spark.sql.catalyst.plans.logical.{AppendData, Join, LogicalPlan, Repartition}
+  import org.apache.spark.sql.catalyst.expressions.{And, AttributeReference, AttributeSet, Expression, NamedExpression, PredicateHelper}
+  import org.apache.spark.sql.catalyst.planning.{ExtractEquiJoinKeys, PhysicalOperation}
+  import org.apache.spark.sql.catalyst.plans.{InnerLike, JoinType}
+  import org.apache.spark.sql.catalyst.plans.logical.{AppendData, DatasourceV2Pushable, Join, JoinWithPushable, LogicalPlan, Repartition}
   import org.apache.spark.sql.execution.{FilterExec, ProjectExec, SparkPlan}
   import org.apache.spark.sql.execution.columnar.InMemoryTableScanExec
   import org.apache.spark.sql.execution.datasources.DataSourceStrategy
-  import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, BroadcastNestedLoopJoinExec, BroadcastNestedLoopPushdownJoinExec, BuildLeft, BuildRight}
+  import org.apache.spark.sql.execution.joins.{BroadcastNestedLoopPushdownJoinExec, BuildLeft, BuildRight}
   import org.apache.spark.sql.execution.streaming.continuous.{ContinuousCoalesceExec, WriteToContinuousDataSource, WriteToContinuousDataSourceExec}
   import org.apache.spark.sql.sources.Filter
   import org.apache.spark.sql.sources.v2.reader._
@@ -149,6 +149,72 @@
       }
     }
 
+
+    private def getPlanForJoin(stream: DataSourceV2Relation,
+                               streamFilters: Seq[Expression],
+                               streamProject : Seq[NamedExpression],
+                               broadcast: LogicalPlan,
+                               joinType: JoinType,
+                               cond: Option[Expression],
+                               push : Option[Expression],
+                               leftBroadcast: Boolean) = {
+        logDebug(
+          s"""stream ${stream.toString}
+             |bcast ${broadcast.toString}
+             """.stripMargin)
+
+        val reader = stream.newReader()
+        reader match {
+          case r: SupportsJoinPushdown =>
+
+            val (pushedFilters, postScanFilters) = pushFilterExpressions(reader, streamFilters)
+            val outputExprs = pruneExpressions(reader, stream, streamProject ++ postScanFilters)
+
+
+            val joinConds = (splitConjunctivePredicates(cond.orNull) ++
+                             splitConjunctivePredicates(push.orNull)).filter(_ != null)
+
+            logDebug(s"joinPushdown... ${joinConds.mkString(", ")}")
+
+            if (r.joinPushdown( joinConds.toArray, broadcast.output.toArray)) {
+              logDebug(
+                s"""
+                   |Join Pushdown.
+                   |broadcast: ${broadcast.toString}
+                   |Pushed Filters: ${pushedFilters.mkString(", ")}
+                   |Post-Scan Filters: ${postScanFilters.mkString(",")}
+                   |Output: ${outputExprs.mkString(", ")}
+                   """.stripMargin)
+
+              val scan = DataSourceV2ScanExec(outputExprs,
+                stream.source, stream.options, pushedFilters, reader)
+
+              val join = if (leftBroadcast) {
+                BroadcastNestedLoopPushdownJoinExec(planLater(broadcast), scan,
+                  BuildLeft, joinType, cond)
+              }
+              else {
+                BroadcastNestedLoopPushdownJoinExec(scan, planLater(broadcast),
+                  BuildRight, joinType, cond)
+              }
+
+              val filterCondition = postScanFilters.reduceLeftOption(And)
+              val withFilter = filterCondition.map(FilterExec(_, join)).getOrElse(join)
+
+              logDebug(s"nlje: ${join.toString}")
+
+              withFilter :: Nil
+            }
+            else {
+              Nil
+            }
+
+          case _ => Nil
+        }
+      }
+
+
+
     override def apply(plan: LogicalPlan): Seq[SparkPlan] = {
       plan match {
       case SingleDataSourceV2Subtree(output,
@@ -185,8 +251,10 @@
             val relOutput = resolved.output
             val inMemScan = InMemoryTableScanExec(resolved.output, Seq.empty, resolved )
             val resolvedRows = inMemScan.executeCollect()
+            val seq =
+              if (join.condition.isDefined) splitConjunctivePredicates(join.condition.get) else Nil
 
-            if (r.nestedLoopJoin(splitConjunctivePredicates(join.condition.orNull).toArray,
+            if (r.nestedLoopJoin(seq.toArray,
                                  relOutput.toArray,
                                  resolvedRows)) {
               logDebug(
@@ -221,86 +289,136 @@
           case _ => Nil
         }
 
-      case j@Join(PhysicalOperation(leftProject, leftFilters, leftRelation),
-                  PhysicalOperation(rightProject, rightFilters, rightRelation),
-                  joinType: InnerLike, cond) =>
+      case DatasourceV2Pushable(projectList, child, matchable) =>
+        child match {
+          case j@Join(PhysicalOperation(leftProj, leftFils, left),
+                      PhysicalOperation(rightProj, rightFils, right),
+                      join: InnerLike, cond) =>
 
-        logDebug(
-          s"""Found a join: ${j.toString}
-             |left rel: ${leftRelation.toString}
-             |right rel: ${rightRelation.toString()}
-             |""".stripMargin)
+            // The planner needs to help me out making these situations happen more frequently
+            if (left.isInstanceOf[DataSourceV2Relation] ||
+                right.isInstanceOf[DataSourceV2Relation]) {
 
-        if (leftRelation.isInstanceOf[DataSourceV2Relation] ||
-            rightRelation.isInstanceOf[DataSourceV2Relation]) {
+              logDebug(
+                s"""Found a d2pushable: ${projectList.mkString(", ")}
+                   |join:  ${j.toString}
+                   |left rel: ${left.toString}
+                   |right rel: ${right.toString()}
+                   |""".stripMargin)
 
-          // decide which of these we want to stream vs. broadcast
-          val (stream, streamFilters, streamProject, broadcast) =
-          rightRelation match {
-            case d: DataSourceV2Relation =>
-              (d, rightFilters, rightProject, j.left)
-            case _ =>
-              (leftRelation.asInstanceOf[DataSourceV2Relation], leftFilters, leftProject, j.right)
-          }
-
-
-          logDebug(
-            s"""stream ${stream.toString}
-               |bcast ${broadcast.toString}
-             """.stripMargin)
-
-          val reader = stream.newReader()
-          reader match {
-            case r: SupportsJoinPushdown =>
-
-              val (pushedFilters, postScanFilters) = pushFilterExpressions(reader, streamFilters)
-              val outputExprs = pruneExpressions(reader, stream, streamProject ++ postScanFilters)
-              // val relOutput = resolved.output
-              // val inMemScan = InMemoryTableScanExec(resolved.output, Seq.empty, resolved )
-              // val resolvedRows = inMemScan.executeCollect()
-
-              if (r.joinPushdown(splitConjunctivePredicates(cond.orNull).toArray,
-                                 broadcast.output.toArray)) {
-                logDebug(
-                  s"""
-                     |Join Pushdown.
-                     |broadcast: ${broadcast.toString}
-                     |Pushed Filters: ${pushedFilters.mkString(", ")}
-                     |Post-Scan Filters: ${postScanFilters.mkString(",")}
-                     |Output: ${outputExprs.mkString(", ")}
-                   """.stripMargin)
-
-                val scan = DataSourceV2ScanExec(outputExprs,
-                                                stream.source,
-                                                stream.options,
-                                                pushedFilters,
-                                                reader)
-
-                val join = if (broadcast.fastEquals(j.left)) {
-                  logDebug("left is broadcast! ")
-                   BroadcastNestedLoopPushdownJoinExec(planLater(broadcast), scan,
-                                                       BuildLeft, joinType, cond)
-                }
-                else {
-                  logDebug("right is broadcast! ")
-                  BroadcastNestedLoopPushdownJoinExec(scan, planLater(broadcast),
-                                                      BuildRight, joinType, cond)
-                }
-
-
-                val filterCondition = postScanFilters.reduceLeftOption(And)
-                val withFilter = filterCondition.map(FilterExec(_, join)).getOrElse(join)
-
-                logDebug(s"nlje: ${join.toString}")
-
-                withFilter :: Nil
+              // decide which of these we want to stream vs. broadcast
+              val (stream, streamFs, streamP, bcast, leftCast) = right match {
+                case d: DataSourceV2Relation if d.source.getClass.getSimpleName == matchable =>
+                  (Some(d), rightFils, rightProj ++ projectList, Some(j.left), false)
+                case _ =>
+                  val d2l = left.asInstanceOf[DataSourceV2Relation]
+                  if (d2l.source.getClass.getSimpleName == matchable) {
+                    (Some(d2l), leftFils, leftProj ++ projectList, Some(j.right), true)
+                  }
+                  else {
+                    (None, Nil, Nil, None, false)
+                  }
               }
-              else {
+
+              if (stream.isDefined) {
+                getPlanForJoin(stream.get, streamFs, streamP, bcast.get, join, cond, None, leftCast)
+              } else {
                 Nil
               }
-
-            case _ => Nil
             }
+            else {
+              Nil
+            }
+          case j@JoinWithPushable(PhysicalOperation(leftProj, leftFils, left),
+                                  PhysicalOperation(rightProj, rightFils, right),
+                                  join: InnerLike, cond, push) =>
+            // The planner needs to help me out making these situations happen more frequentl
+            if (left.isInstanceOf[DataSourceV2Relation] ||
+                right.isInstanceOf[DataSourceV2Relation]) {
+
+              // decide which of these we want to stream vs. broadcast
+              val (stream, streamFs, streamP, bcast, leftCast) = right match {
+                case d: DataSourceV2Relation if d.source.getClass.getSimpleName == matchable =>
+                  (Some(d), rightFils, rightProj ++ projectList, Some(j.left), false)
+                case _ =>
+                  val d2l = left.asInstanceOf[DataSourceV2Relation]
+                  if (d2l.source.getClass.getSimpleName == matchable) {
+                    (Some(d2l), leftFils, leftProj ++ projectList, Some(j.right), true)
+                  }
+                  else {
+                    (None, Nil, Nil, None, false)
+                  }
+              }
+
+              logDebug(
+                s"""Found a d2 joinWithPushable: ${j.toString}
+                   |left rel: ${left.toString}
+                   |right rel: ${right.toString()}""".stripMargin)
+
+              if (stream.isDefined) {
+                getPlanForJoin(stream.get, streamFs, streamP, bcast.get, join, cond, push, leftCast)
+              } else {
+                Nil
+              }
+            }
+            else {
+              Nil
+            }
+          case _ => Nil
+        }
+
+      case j@Join(PhysicalOperation(leftProj, leftFils, leftRel),
+                  PhysicalOperation(rightProj, rightFils, rightRel),
+                  joinType: InnerLike, cond) =>
+
+        // The planner needs to help me out making these situations happen more frequently
+        if (leftRel.isInstanceOf[DataSourceV2Relation] ||
+          rightRel.isInstanceOf[DataSourceV2Relation]) {
+
+          // decide which of these we want to stream vs. broadcast
+          val (stream, streamFils, streamProj, bcast, leftCast) = rightRel match {
+            case d: DataSourceV2Relation =>
+              (d, rightFils, rightProj, j.left, false)
+            case _ =>
+              (leftRel.asInstanceOf[DataSourceV2Relation], leftFils, leftProj, j.right, true)
+          }
+
+          logDebug(
+                s"""Found a d2 join: ${j.toString}
+               |left rel: ${leftRel.toString}
+               |right rel: ${rightRel.toString()}
+               |""".stripMargin)
+
+          getPlanForJoin(stream, streamFils, streamProj, bcast, joinType, cond, None, leftCast)
+        }
+        else {
+          Nil
+        }
+
+      case j@JoinWithPushable(PhysicalOperation(leftProj, leftFils, leftRel),
+                              PhysicalOperation(rightProj, rightFils, rightRel),
+                              joinType: InnerLike, cond, push) =>
+
+
+        // The planner needs to help me out making these situations happen more frequently
+        if (leftRel.isInstanceOf[DataSourceV2Relation] ||
+          rightRel.isInstanceOf[DataSourceV2Relation]) {
+
+          // decide which of these we want to stream vs. broadcast
+          val (stream, streamFils, streamProj, bcast, leftCast) = rightRel match {
+            case d: DataSourceV2Relation =>
+              (d, rightFils, rightProj, j.left, false)
+            case _ =>
+              (leftRel.asInstanceOf[DataSourceV2Relation], leftFils, leftProj, j.right, true)
+          }
+
+          logDebug(
+            s"""Found a d2 joinWithPushable: ${j.toString}
+               |left rel: ${leftRel.toString}
+               |right rel: ${rightRel.toString()}
+               |""".stripMargin)
+
+          getPlanForJoin(stream, streamFils, streamProj, bcast, joinType, cond, push, leftCast)
         }
         else {
           Nil
