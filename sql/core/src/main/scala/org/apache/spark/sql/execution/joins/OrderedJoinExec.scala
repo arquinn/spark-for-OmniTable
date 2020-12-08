@@ -30,7 +30,7 @@ import org.apache.spark.sql.execution.metric.SQLMetrics
 
 
 /**
- * Performs a next join of two child relations.
+ * Performs an ordered join of two child relations.
  */
 
 case class OrderedJoinExec(leftEqiKeys: Seq[Expression],
@@ -54,7 +54,8 @@ case class OrderedJoinExec(leftEqiKeys: Seq[Expression],
     PartitioningCollection(Seq(left.outputPartitioning, right.outputPartitioning))
 
   override def requiredChildDistribution: Seq[Distribution] =
-    HashClusteredDistribution(leftKeys) :: HashClusteredDistribution(rightKeys) :: Nil
+    HashClusteredDistribution(leftEqiKeys) :: HashClusteredDistribution(rightEqiKeys) :: Nil
+  // this seems broken?
 
   override def outputOrdering: Seq[SortOrder] = {
     // For inner join, orders of both sides keys should be kept.
@@ -111,29 +112,13 @@ case class OrderedJoinExec(leftEqiKeys: Seq[Expression],
   private def createRightOrderKeyGenerator(): Projection =
     UnsafeProjection.create(rightOrderKeys, right.output)
 
-
-
-  private def getSpillThreshold: Int = sqlContext.conf.sortMergeJoinExecBufferSpillThreshold
-
-  private def getInMemoryThreshold: Int = sqlContext.conf.sortMergeJoinExecBufferInMemoryThreshold
-
   protected override def doExecute(): RDD[InternalRow] = {
 
     logInfo(s"""orderedJoinExec DoExecute Starting! ${joinType} """)
     val numOutputRows = longMetric("numOutputRows")
-    val spillThreshold = getSpillThreshold
-    val inMemoryThreshold = getInMemoryThreshold
 
     // I don't think this works in the case that right is empty?
     left.execute().zipPartitions(right.execute()) { (leftIter, rightIter) =>
-
-      val boundCondition: (InternalRow) => Boolean = {
-        condition.map { cond =>
-          newPredicate(cond, left.output ++ right.output).eval _
-        }.getOrElse {
-          (r: InternalRow) => true
-        }
-      }
 
       // An ordering that can be used to compare keys from both sides.
       // val keyOrdering = newNaturalAscendingOrdering(leftKeys.map(_.dataType))
@@ -142,7 +127,7 @@ case class OrderedJoinExec(leftEqiKeys: Seq[Expression],
       val resultProj: InternalRow => InternalRow = UnsafeProjection.create(output, output)
 
       new RowIterator {
-
+        logInfo("creating rowIterator (how many times does this happen??)")
         private[this] val scanner: OrderedJoinScanner = joinType match {
           case NextOJT => new NextJoinScanner(
             createLeftKeyGenerator(),
@@ -258,6 +243,9 @@ private[joins] abstract class OrderedJoinScanner(lKeyGen: Projection,
       leftRowKey = lKeyGen(leftRow)
       leftOrderKey = lOKeyGen(leftRow)
       foundRow = !leftRowKey.anyNull
+      // logInfo(s"""advancedLeft(): ${leftRow.toString} """)
+      // logInfo(s"""${leftRowKey.toString} and  ${leftOrderKey.toString}""")
+
       // leftFinished = leftIter.advanceNext()
     }
 
@@ -375,11 +363,14 @@ private[joins] class LeftNextJoinScanner(lKeyG: Projection,
   // we need a status variable to tell us if we're draining left
   var drainLeft = false
   override  def findJoinRow() : (InternalRow, InternalRow) = {
+
     advancedLeft()
 
     if (!drainLeft) {
       advancedRight()
     }
+
+    // logInfo(s"findJoinRow for ${if (leftRow != null) leftRow.toString else "none"}")
 
     if (leftRow == null) {
       // We have consumed the entire streamed iterator, so there can be no more matches.
@@ -387,6 +378,7 @@ private[joins] class LeftNextJoinScanner(lKeyG: Projection,
       (null, null)
     } else if (rightRow == null) {
       // There are no more rows to read from the buffered iterator, so return the left
+      // logInfo("finished with rightRows!")
       drainLeft = true
       (leftRow, null)
     } else {
@@ -402,6 +394,8 @@ private[joins] class LeftNextJoinScanner(lKeyG: Projection,
         }
         else if (comp == 0) {
           val oComp = oKeyOrder.compare(leftOrderKey, rightOrderKey)
+          // logInfo(s"""ocomp between ${leftRow.toString} and ${rightRow.toString} is ${oComp}""")
+
           if (oComp >= 0) {
             comp = 1
             advancedRight()

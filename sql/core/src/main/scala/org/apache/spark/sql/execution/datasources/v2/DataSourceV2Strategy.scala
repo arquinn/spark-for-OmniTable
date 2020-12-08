@@ -300,7 +300,8 @@
                 right.isInstanceOf[DataSourceV2Relation]) {
 
               logDebug(
-                s"""Found a d2pushable: ${projectList.mkString(", ")}
+                s"""Found a d2pushable:
+                   | ${projectList.mkString(", ")}
                    |join:  ${j.toString}
                    |left rel: ${left.toString}
                    |right rel: ${right.toString()}
@@ -332,7 +333,7 @@
           case j@JoinWithPushable(PhysicalOperation(leftProj, leftFils, left),
                                   PhysicalOperation(rightProj, rightFils, right),
                                   join: InnerLike, cond, push) =>
-            // The planner needs to help me out making these situations happen more frequentl
+            // The planner needs to help me out making these situations happen more frequently
             if (left.isInstanceOf[DataSourceV2Relation] ||
                 right.isInstanceOf[DataSourceV2Relation]) {
 
@@ -351,7 +352,8 @@
               }
 
               logDebug(
-                s"""Found a d2 joinWithPushable: ${j.toString}
+                s"""Found a d2 joinWithPushable:
+                   | ${j.toString}
                    |left rel: ${left.toString}
                    |right rel: ${right.toString()}""".stripMargin)
 
