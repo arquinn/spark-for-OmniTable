@@ -62,7 +62,7 @@ import org.apache.spark.storage.StorageLevel
 import org.apache.spark.unsafe.types.CalendarInterval
 import org.apache.spark.util.Utils
 
-private[sql] object Dataset {
+object Dataset {
   def apply[T: Encoder](sparkSession: SparkSession, logicalPlan: LogicalPlan): Dataset[T] = {
     val dataset = new Dataset(sparkSession, logicalPlan, implicitly[Encoder[T]])
     // Eagerly bind the encoder so we verify that the encoder matches the underlying
@@ -105,7 +105,7 @@ private[sql] object Dataset {
  * code at runtime to serialize the `Person` object into a binary structure. This binary structure
  * often has much lower memory footprint as well as are optimized for efficiency in data processing
  * (e.g. in a columnar format). To understand the internal binary representation for data, use the
- * `schema` function.
+ * `schema` function.D
  *
  * There are typically two ways to create a Dataset. The most common way is by pointing Spark
  * to some files on storage systems, using the `read` function available on a `SparkSession`.
@@ -169,8 +169,10 @@ private[sql] object Dataset {
  *
  * @since 1.6.0
  */
+// private[sql](
+
 @InterfaceStability.Stable
-class Dataset[T] private[sql](
+class Dataset[T](
     @transient val sparkSession: SparkSession,
     @DeveloperApi @InterfaceStability.Unstable @transient val queryExecution: QueryExecution,
     encoder: Encoder[T])
@@ -188,8 +190,8 @@ class Dataset[T] private[sql](
   def this(sqlContext: SQLContext, logicalPlan: LogicalPlan, encoder: Encoder[T]) = {
     this(sqlContext.sparkSession, logicalPlan, encoder)
   }
-
-  @transient private[sql] val logicalPlan: LogicalPlan = {
+  // private[sql]
+  @transient val logicalPlan: LogicalPlan = {
     // For various commands (like DDL) and queries with side effects, we force query execution
     // to happen right away to let these side effects take place eagerly.
     queryExecution.analyzed match {
@@ -860,6 +862,7 @@ class Dataset[T] private[sql](
     Join(logicalPlan, right.logicalPlan, joinType = Inner, None)
   }
 
+
   /**
    * Inner equi-join with another `DataFrame` using the given column.
    *
@@ -1133,22 +1136,7 @@ class Dataset[T] private[sql](
     withTypedPlan(Join(left, right, joined.joinType, Some(conditionExpr)))
   }
 
-  /**
-   * :: Experimental ::
-   *
-   * New for the OmniTable: STACKJOIN!
-   * This joins the two relations such that each row is joined with the next row
-   * of other (when ordered based on order1 and order2)
-   *
-   * @group typedrel
-   * @since 2.0.0
-   */
-  @Experimental
-  def orderedJoin(other: Dataset[_], condition: Column,
-                  order1: Seq[Column], order2: Seq[Column], t: String): DataFrame = {
-    withPlan(SDOrderedJoin(logicalPlan, other.logicalPlan,
-      order1.map(_.expr), order2.map(_.expr), Some(condition.expr), OrderedJoinType(t)))
-  }
+
 
   /**
    * :: Experimental ::
@@ -3422,7 +3410,7 @@ class Dataset[T] private[sql](
   }
 
   /** A convenient function to wrap a logical plan and produce a DataFrame. */
-  @inline private def withPlan(logicalPlan: LogicalPlan): DataFrame = {
+  @inline def withPlan(logicalPlan: LogicalPlan): DataFrame = {
     Dataset.ofRows(sparkSession, logicalPlan)
   }
 

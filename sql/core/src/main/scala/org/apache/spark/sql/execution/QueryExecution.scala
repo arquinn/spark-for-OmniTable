@@ -87,7 +87,8 @@ class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) e
    * row format conversions as needed.
    */
   protected def prepareForExecution(plan: SparkPlan): SparkPlan = {
-    preparations.foldLeft(plan) { case (sp, rule) => rule.apply(sp) }
+    (preparations ++ sparkSession.sessionState.prepareExecutionRules)
+      .foldLeft(plan) { case (sp, rule) => rule.apply(sp) }
   }
 
   /** A sequence of rules that will be applied in order to the physical plan before execution. */

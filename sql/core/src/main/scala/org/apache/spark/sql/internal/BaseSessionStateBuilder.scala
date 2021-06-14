@@ -25,7 +25,7 @@ import org.apache.spark.sql.catalyst.optimizer.Optimizer
 import org.apache.spark.sql.catalyst.parser.ParserInterface
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.catalyst.rules.Rule
-import org.apache.spark.sql.execution.{QueryExecution, SparkOptimizer, SparkPlanner, SparkSqlParser}
+import org.apache.spark.sql.execution.{QueryExecution, SparkOptimizer, SparkPlan, SparkPlanner, SparkSqlParser}
 import org.apache.spark.sql.execution.datasources._
 import org.apache.spark.sql.streaming.StreamingQueryManager
 import org.apache.spark.sql.util.ExecutionListenerManager
@@ -248,6 +248,16 @@ abstract class BaseSessionStateBuilder(
   }
 
   /**
+   * Custom strategies to add to the planner. Prefer overriding this instead of creating
+   * your own Planner.
+   *
+   * Note that this may NOT depend on the `planner` function.
+   */
+  protected def customPrepareExecutionRules: Seq[Rule[SparkPlan]] = {
+    extensions.buildPrepareExectionRules(session)
+  }
+
+  /**
    * Create a query execution object.
    */
   protected def createQueryExecution: LogicalPlan => QueryExecution = { plan =>
@@ -297,7 +307,8 @@ abstract class BaseSessionStateBuilder(
       listenerManager,
       () => resourceLoader,
       createQueryExecution,
-      createClone)
+      createClone,
+      customPrepareExecutionRules)
   }
 }
 

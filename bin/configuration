@@ -1,5 +1,7 @@
 spark.driver.userClassPathFirst=true
 spark.executor.userClassPathFirst=true
+spark.executor.extraJavaOptions:-XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/tmp/heapDumps
+spark.driver.extraJavaOptions:-XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/tmp/heapDumps
 
-spark.driver.memory 2048m
-spark.executor.memory 2048m
+spark.driver.memory 2g
+spark.executor.memory 2g

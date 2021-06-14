@@ -28,7 +28,7 @@ import org.apache.spark.sql.execution.datasources.v2.DataSourceV2ScanExec
 import org.apache.spark.sql.execution.metric.SQLMetrics
 
 
-case class BroadcastNestedLoopPushdownJoinExec(
+case class BroadcastBlockNestedLoopJoinExec(
     left: SparkPlan,
     right: SparkPlan,
     buildSide: BuildSide,

@@ -17,19 +17,15 @@
 
 package org.apache.spark.sql.sources.v2.reader;
 
-import org.apache.spark.sql.catalyst.expressions.Attribute;
-import org.apache.spark.sql.catalyst.expressions.Expression;
+import org.apache.spark.annotation.InterfaceStability;
+import org.apache.spark.sql.sources.v2.reader.streaming.PartitionOffset;
 
-public interface SupportsJoinPushdown {
+
+@InterfaceStability.Evolving
+public interface DataSourceV2NeedsPrepare {
     /**
-     * Push down the join conditions for the query, assuming you get input attributes.
-     *
-     * Implementation should try its best to prune the unnecessary columns or nested fields, but it's
-     * also OK to do the pruning partially, e.g., a data source may not be able to prune nested
-     * fields, and only prune top-level columns.
+     * Prepare the DataSource for execution.
      *
      */
-    Expression[] joinPushdown(Expression[] expressions, Attribute[] input);
-    Expression[] pushedJoinConditions();
-
+    void doPrepare();
 }

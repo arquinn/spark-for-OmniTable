@@ -69,6 +69,8 @@ case class DataSourceV2Relation(
       Statistics(sizeInBytes = conf.defaultSizeInBytes)
   }
 
+
+
   override def newInstance(): DataSourceV2Relation = {
     copy(output = output.map(_.newInstance()))
   }

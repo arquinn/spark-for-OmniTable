@@ -141,7 +141,10 @@ abstract class LeafNode extends LogicalPlan {
   override def producedAttributes: AttributeSet = outputSet
 
   /** Leaf nodes that can survive analysis must define their own statistics. */
-  def computeStats(): Statistics = throw new UnsupportedOperationException
+  def computeStats(): Statistics = {
+    logInfo(s"Who the fuck am I? ${treeString}")
+    throw new UnsupportedOperationException
+  }
 }
 
 /**

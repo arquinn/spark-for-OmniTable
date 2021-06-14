@@ -309,7 +309,7 @@ case class StructType(fields: Array[StructField]) extends DataType with Seq[Stru
     nameToIndex.get(name)
   }
 
-  protected[sql] def toAttributes: Seq[AttributeReference] =
+  def toAttributes: Seq[AttributeReference] =
     map(f => AttributeReference(f.name, f.dataType, f.nullable, f.metadata)())
 
   def treeString: String = {

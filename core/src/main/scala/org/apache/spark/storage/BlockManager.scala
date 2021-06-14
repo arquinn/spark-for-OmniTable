@@ -588,7 +588,6 @@ private[spark] class BlockManager(
         if (level.useMemory && memoryStore.contains(blockId)) {
 
           val iter: Iterator[Any] = if (level.deserialized) {
-            logDebug(s"dis case")
             memoryStore.getValues(blockId).get
           } else {
             serializerManager.dataDeserializeStream(

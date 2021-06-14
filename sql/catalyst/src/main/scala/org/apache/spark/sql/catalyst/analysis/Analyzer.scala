@@ -884,7 +884,6 @@ class Analyzer(
     private def resolve(e: Expression, q: LogicalPlan): Expression = {
       e match {
         case f: LambdaFunction if !f.bound =>
-          logDebug("bound lambda function.");
           f
         case u@UnresolvedAttribute(nameParts) =>
           // Leave unchanged if resolution fails. Hopefully will be resolved next round.
@@ -896,10 +895,8 @@ class Analyzer(
             }
           result
         case UnresolvedExtractValue(child, fieldExpr) if child.resolved =>
-          logDebug("resolvedExtractValue.")
           ExtractValue(child, fieldExpr, resolver)
         case u =>
-          logDebug("trying to resolve children.")
           e.mapChildren(resolve(_, q))
       }
     }
@@ -936,11 +933,6 @@ class Analyzer(
         i.copy(right = dedupRight(left, right))
       case e @ Except(left, right, _) if !e.duplicateResolved =>
         e.copy(right = dedupRight(left, right))
-
-      // OMNITABLE -- TRY THIS
-      case nj @ SDOrderedJoin(left, right, _, _, _, _) if !nj.duplicateResolved =>
-        nj.copy(right = dedupRight(left, right))
-
 
       // When resolve `SortOrder`s in Sort based on child, don't report errors as
       // we still have chance to resolve it based on its descendants

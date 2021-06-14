@@ -73,7 +73,7 @@ case class DataSourceV2ScanExec(
     case _ => super.outputPartitioning
   }
 
-  private lazy val partitions: Seq[InputPartition[InternalRow]] = {
+  protected lazy val partitions: Seq[InputPartition[InternalRow]] = {
     reader.planInputPartitions().asScala
   }
 
@@ -109,6 +109,7 @@ case class DataSourceV2ScanExec(
     case r: SupportsScanColumnarBatch if r.enableBatchRead() => true
     case _ => false
   }
+
 
   override protected def needsUnsafeRowConversion: Boolean = false
 

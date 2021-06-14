@@ -63,7 +63,6 @@ abstract class Optimizer(sessionCatalog: SessionCatalog)
         // ReorderJoin,
         EliminateOuterJoin,
         PushPredicateThroughJoin,
-        PushPredicateThroughOrderedJoin,
         PushDownPredicate,
         LimitPushDown,
         ColumnPruning,
@@ -367,24 +366,6 @@ object RemoveRedundantAliases extends Rule[LogicalPlan] {
           case a: Attribute => mapping.getOrElse(a, a)
         })
         Join(newLeft, newRight, joinType, newCondition)
-
-
-      // OmniTable NextJoin needs to be treated similarly to a Join!
-      // We use a blacklist to prevent us from creating a
-      // situation in which this happens; the rule will only remove an alias if its child
-      // attribute is not on the black list.
-      case SDOrderedJoin(left, right, leftExpr, rightExpr, condition, t) =>
-        val newLeft = removeRedundantAliases(left, blacklist ++ right.outputSet)
-        val newRight = removeRedundantAliases(right, blacklist ++ newLeft.outputSet)
-        val mapping = AttributeMap(
-          createAttributeMapping(left, newLeft) ++
-            createAttributeMapping(right, newRight))
-        val newCondition = condition.map(_.transform {
-          case a: Attribute => mapping.getOrElse(a, a)
-        })
-        val newLeftExpr = leftExpr.map(le => mapping.getOrElse(le.asInstanceOf[Attribute], le))
-        val newRightExpr = rightExpr.map(re => mapping.getOrElse(re.asInstanceOf[Attribute], re))
-        SDOrderedJoin(newLeft, newRight, newLeftExpr, newRightExpr, newCondition, t)
 
       case _ =>
         // Remove redundant aliases in the subtree(s).
@@ -1181,6 +1162,7 @@ object PushPredicateThroughJoin extends Rule[LogicalPlan] with PredicateHelper {
     val (rightEvaluateCondition, commonCondition) =
         rest.partition(expr => expr.references.subsetOf(right.outputSet))
 
+
     (leftEvaluateCondition, rightEvaluateCondition, commonCondition ++ nonDeterministic)
   }
 
@@ -1270,168 +1252,6 @@ object PushPredicateThroughJoin extends Rule[LogicalPlan] with PredicateHelper {
 }
 
 
-/**
- * Pushes down [[Filter]] opeartors when dealing with a NextJoin operator (why this
- * has to be separate... complain to spark devs.)
- */
-object PushPredicateThroughOrderedJoin extends Rule[LogicalPlan] with PredicateHelper with Logging {
-  /**
-   * Splits join condition expressions or filter predicates (on a given join's output) into three
-   * categories based on the attributes required to evaluate them. Note that we explicitly exclude
-   * non-deterministic (i.e., stateful) condition expressions in canEvaluateInLeft or
-   * canEvaluateInRight to prevent pushing these predicates on either side of the join.
-   *
-   * @return (canEvaluateInLeft, canEvaluateInRight, haveToEvaluateInBoth)
-   */
-  private def split(condition: Seq[Expression], left: LogicalPlan, right: LogicalPlan) = {
-    val (candidates, nonDet) = condition.partition(c => {c.deterministic && c != Literal(true)})
-    val (leftExprs, rest) = candidates.partition(_.references.subsetOf(left.outputSet))
-    val (rightExprs, common) = rest.partition(_.references.subsetOf(right.outputSet))
-
-    (leftExprs, rightExprs, common ++ nonDet)
-  }
-
-  private def parseCondition(cond: Expression, filters: Seq[Expression]): Seq[Expression] = {
-    cond match {
-      case _ @ Or(left, right) =>
-        val lList = parseCondition(left, filters)
-        val rList = parseCondition(right, filters)
-        lList.flatMap(l => rList.map(Or(l, _)))
-
-      case _ @ And(left, right) =>
-        val lList = parseCondition(left, filters)
-        val rList = parseCondition(right, filters)
-        lList.flatMap(l => rList.map(And(l, _)))
-
-      case _ @ EqualTo(left, right) =>
-        // determine if the left or right can be substituted into any filters
-        filters.flatMap( filter => {
-          val childMap = filter.children.flatMap(child => {
-            if (child == left) {
-              Some((child, right))
-            }
-            else if (child == right) {
-              Some((child, left))
-            }
-            else {
-              None
-            }
-          })
-
-          // now, we know if children map at all.
-          childMap.map( tuple => {
-            val n = filter.mapChildren(e => {
-              if (e == tuple._1) {
-                tuple._2
-              }
-              else {
-                e
-              }
-            })
-            n
-          })
-        })
-      case _ =>
-        Nil
-    }
-  }
-
-  private def containsNullComp(expr: Expression): Boolean = {
-    expr match {
-      case IsNull(_) =>
-        true
-      case IsNotNull(_) =>
-        true
-      case _ =>
-        if (expr.children.nonEmpty) {
-          expr.children.map(containsNullComp(_)).exists(identity)
-        } else {
-          false
-        }
-    }
-  }
-
-
-  private def createExtraFilters(filters: Seq[Expression],
-                                 conditions: Seq[Expression] ): Seq[Expression] = {
-
-    val (candidates, _) = filters.partition(_.deterministic)
-    conditions.flatMap( cond => parseCondition(cond, candidates))
-  }
-
-
-  def apply(plan: LogicalPlan): LogicalPlan = plan transform {
-
-    // push the where condition down into join filter
-    case f @ Filter(filterCondition, SDOrderedJoin(left, right, leftExpr, rightExpr, jc, t)) =>
-      val extraFilters = createExtraFilters(splitConjunctivePredicates(filterCondition),
-        jc.map(splitConjunctivePredicates).getOrElse(Nil))
-
-      val (leftConds, rightConds, commonConds) =
-        split(splitConjunctivePredicates(filterCondition), left, right)
-      val (extraLeft, extraRight, extraCommon) = split(extraFilters, left, right)
-
-      t match {
-
-        case LeftStackOJT =>
-
-          // push down the single side `where` condition into respective sides
-
-          val newLeft =
-            (leftConds ++ extraLeft).reduceLeftOption(And).map(Filter(_, left)).getOrElse(left)
-
-          // figure out which (if any) of the right conditionals we can push:
-          val rightPushable =
-            (extraRight ++ rightConds).filterNot(containsNullComp(_))
-          val rightUnpushable = (rightConds).filter(containsNullComp(_))
-
-          logInfo(
-            s"""pushable: ${rightPushable.mkString(", ")}
-               |unpushable: ${rightUnpushable.mkString(", ")}
-             """.stripMargin)
-
-          val newRight =
-            rightPushable.reduceLeftOption(And).map(Filter(_, right)).getOrElse(right)
-
-          val rtn = SDOrderedJoin(newLeft, newRight, leftExpr, rightExpr, jc, t)
-          rightUnpushable.reduceLeftOption(And).map(Filter(_, rtn)).getOrElse(rtn)
-
-        case _ =>
-          // push down the single side `where` condition into respective sides
-          val newLeft =
-            (leftConds ++ extraLeft).reduceLeftOption(And).map(Filter(_, left)).getOrElse(left)
-          val newRight =
-            (rightConds ++ extraRight).reduceLeftOption(And).map(Filter(_, right)).getOrElse(right)
-          val (newJoinConds, others) = (commonConds ++ extraCommon).partition(canEvaluateWithinJoin)
-          val newCond = (newJoinConds ++ jc).reduceLeftOption(And)
-
-          var rtn: LogicalPlan = SDOrderedJoin(newLeft, newRight, leftExpr, rightExpr, newCond, t)
-          if (others.nonEmpty) {
-            rtn = Filter(others.reduceLeft(And), rtn)
-          }
-
-          logInfo(s"filter ${sideBySide(f.treeString, rtn.treeString).mkString("\n")}")
-          rtn
-      }
-
-    // push down the join filter into sub query scanning if applicable
-    case j @ SDOrderedJoin(left, right, leftExpr, rightExpr, joinCondition, t) =>
-      val (leftJoinConditions, rightJoinConditions, commonJoinCondition) =
-        split(joinCondition.map(splitConjunctivePredicates).getOrElse(Nil), left, right)
-
-
-      // push down the single side only join filter for both sides sub queries
-      val newLeft = leftJoinConditions.
-        reduceLeftOption(And).map(Filter(_, left)).getOrElse(left)
-      val newRight = rightJoinConditions.
-        reduceLeftOption(And).map(Filter(_, right)).getOrElse(right)
-      val newJoinCond = commonJoinCondition.reduceLeftOption(And)
-
-      val newJoin = SDOrderedJoin(newLeft, newRight, leftExpr, rightExpr, newJoinCond, t)
-      logInfo(s"nxtJoin\n ${sideBySide(j.treeString, newJoin.treeString).mkString("\n")}")
-      newJoin
-  }
-}
 
 
 
