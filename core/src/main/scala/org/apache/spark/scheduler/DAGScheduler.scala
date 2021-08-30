@@ -1120,8 +1120,13 @@ private[spark] class DAGScheduler(
         runningStages -= stage
         return
     }
+    // this standard approach obviously fails, right?
+    val values = taskIdToLocations.toSeq.sortBy(_._1).map(_._2).toSeq
 
-    stage.makeNewStageAttempt(partitionsToCompute.size, taskIdToLocations.values.toSeq)
+    // logError(s"stage:${stage.name} jobId: ${jobId} vals ${values.mkString(", ")}")
+
+    // stage.makeNewStageAttempt(partitionsToCompute.size, taskIdToLocations.values.toSeq)
+    stage.makeNewStageAttempt(partitionsToCompute.size, values)
 
     // If there are tasks to execute, record the submission time of the stage. Otherwise,
     // post the even without the submission time, which indicates that this stage was
