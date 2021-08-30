@@ -153,7 +153,7 @@ class Column(val expr: Expression) extends Logging {
   /**
    * Returns the expression for this column either with an existing or auto assigned name.
    */
-  private[sql] def named: NamedExpression = expr match {
+  def named: NamedExpression = expr match {
     // Wrap UnresolvedAttribute with UnresolvedAlias, as when we resolve UnresolvedAttribute, we
     // will remove intermediate Alias for ExtractValue chain, and we need to alias it again to
     // make it a NamedExpression.

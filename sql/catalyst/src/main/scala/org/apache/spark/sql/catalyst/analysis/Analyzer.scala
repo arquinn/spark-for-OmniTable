@@ -799,6 +799,11 @@ class Analyzer(
           if AttributeSet(windowExpressions.map(_.toAttribute)).intersect(conflictingAttributes)
             .nonEmpty =>
           (oldVersion, oldVersion.copy(windowExpressions = newAliases(windowExpressions)))
+
+        case oldVersion : PassThrough
+            if oldVersion.producedAttributes.intersect(conflictingAttributes).nonEmpty =>
+
+          (oldVersion, oldVersion.newInstance())
       }
         // Only handle first case, others will be fixed on the next pass.
         .headOption match {
