@@ -89,10 +89,10 @@ fi
 
 for slave in `echo "$HOSTLIST"|sed  "s/#.*$//;/^$/d"`; do
   if [ -n "${SPARK_SSH_FOREGROUND}" ]; then
-    ssh $SPARK_SSH_OPTS "$slave" $"${@// /\\ }" \
+    ssh $SPARK_SSH_OPTS "$slave" $"${@// /\\ } -h $slave" \
       2>&1 | sed "s/^/$slave: /"
   else
-    ssh $SPARK_SSH_OPTS "$slave" $"${@// /\\ }" \
+    ssh $SPARK_SSH_OPTS "$slave" $"${@// /\\ } -h $slave" \
       2>&1 | sed "s/^/$slave: /" &
   fi
   if [ "$SPARK_SLAVE_SLEEP" != "" ]; then
