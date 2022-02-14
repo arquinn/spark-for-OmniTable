@@ -70,17 +70,23 @@ case class BoundReference(ordinal: Int, dataType: DataType, nullable: Boolean)
 }
 
 object BindReferences extends Logging {
+
   def bindReference[A <: Expression](
       expression: A,
       input: AttributeSeq,
       allowFailures: Boolean = false): A = {
-    expression.transform { case n : NamedExpression =>
-      var ordinal = input.indexOf(n.exprId)
-      if (ordinal == -1) {
-        n
-      }
-      else {
-        BoundReference(ordinal, n.dataType, input(ordinal).nullable)
+    expression.transform { case a: AttributeReference =>
+      attachTree(a, "Binding attribute") {
+        val ordinal = input.indexOf(a.exprId)
+        if (ordinal == -1) {
+          if (allowFailures) {
+            a
+          } else {
+            sys.error(s"Couldn't find $a in ${input.attrs.mkString("[", ",", "]")}")
+          }
+        } else {
+          BoundReference(ordinal, a.dataType, input(ordinal).nullable)
+        }
       }
     }.asInstanceOf[A] // Kind of a hack, but safe.  TODO: Tighten return type when possible.
   }

@@ -17,7 +17,6 @@
 
 package org.apache.spark.sql.catalyst
 
-import org.apache.spark.internal.Logging
 import org.apache.spark.sql.AnalysisException
 import org.apache.spark.sql.catalyst.trees.TreeNode
 
@@ -26,7 +25,7 @@ import org.apache.spark.sql.catalyst.trees.TreeNode
  * Analysis consists of translating [[UnresolvedAttribute]]s and [[UnresolvedRelation]]s
  * into fully typed objects using information in a schema [[Catalog]].
  */
-package object analysis extends Logging {
+package object analysis {
 
   /**
    * Resolver should return true if the first string refers to the same entity as the second string.
@@ -36,13 +35,6 @@ package object analysis extends Logging {
 
   val caseInsensitiveResolution = (a: String, b: String) => a.equalsIgnoreCase(b)
   val caseSensitiveResolution = (a: String, b: String) => a == b
-
-
-  def mapItemGetResolver(origResolver: Resolver): Resolver = (a: String, b: String) =>
-  {
-    logInfo(s"custom resolver")
-    origResolver(a, b)
-  }
 
   implicit class AnalysisErrorAt(t: TreeNode[_]) {
     /** Fails the analysis at the point where a specific tree node was parsed. */

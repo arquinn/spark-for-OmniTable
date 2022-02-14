@@ -18,10 +18,8 @@
 package org.apache.spark.sql.sources.v2.reader;
 
 import java.io.Serializable;
-import java.util.Iterator;
 
 import org.apache.spark.annotation.InterfaceStability;
-import org.apache.spark.sql.catalyst.InternalRow;
 
 /**
  * An input partition returned by {@link DataSourceReader#planInputPartitions()} and is
@@ -61,8 +59,4 @@ public interface InputPartition<T> extends Serializable {
    * get retried until hitting the maximum retry times.
    */
   InputPartitionReader<T> createPartitionReader();
-
-  default InputPartitionReader<T> createPushdownPartitionReader(Iterator<InternalRow> rows) {
-    return createPartitionReader();
-  }
 }

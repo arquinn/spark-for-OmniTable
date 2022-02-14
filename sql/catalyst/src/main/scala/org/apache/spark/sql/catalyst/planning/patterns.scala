@@ -21,7 +21,6 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.sql.AnalysisException
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.aggregate.AggregateExpression
-import org.apache.spark.sql.catalyst.optimizer.OrderedJoin
 import org.apache.spark.sql.catalyst.plans._
 import org.apache.spark.sql.catalyst.plans.logical._
 
@@ -141,8 +140,6 @@ object ExtractEquiJoinKeys extends Logging with PredicateHelper {
     case _ => None
   }
 }
-
-
 
 /**
  * A pattern that collects the filter and inner joins.

@@ -579,14 +579,16 @@ private[spark] class BlockManager(
    * Get block from local block manager as an iterator of Java objects.
    */
   def getLocalValues(blockId: BlockId): Option[BlockResult] = {
+    logDebug(s"Getting local block $blockId")
     blockInfoManager.lockForReading(blockId) match {
       case None =>
+        logDebug(s"Block $blockId was not found")
         None
       case Some(info) =>
         val level = info.level
+        logDebug(s"Level for block $blockId is $level")
         val taskAttemptId = Option(TaskContext.get()).map(_.taskAttemptId())
         if (level.useMemory && memoryStore.contains(blockId)) {
-
           val iter: Iterator[Any] = if (level.deserialized) {
             memoryStore.getValues(blockId).get
           } else {
@@ -629,6 +631,7 @@ private[spark] class BlockManager(
    * Get block from the local block manager as serialized bytes.
    */
   def getLocalBytes(blockId: BlockId): Option[BlockData] = {
+    logDebug(s"Getting local block $blockId as bytes")
     // As an optimization for map output fetches, if the block is for a shuffle, return it
     // without acquiring a lock; the disk store never deletes (recent) items so this should work
     if (blockId.isShuffle) {
@@ -651,7 +654,7 @@ private[spark] class BlockManager(
    */
   private def doGetLocalBytes(blockId: BlockId, info: BlockInfo): BlockData = {
     val level = info.level
-    logDebug(s"Level for block $blockId is $level blockinfo")
+    logDebug(s"Level for block $blockId is $level")
     // In order, try to read the serialized bytes from memory, then from disk, then fall back to
     // serializing in-memory objects, and, finally, throw an exception if the block does not exist.
     if (level.deserialized) {
@@ -671,7 +674,6 @@ private[spark] class BlockManager(
       }
     } else {  // storage level is serialized
       if (level.useMemory && memoryStore.contains(blockId)) {
-        logDebug(s"tracked it down to this case")
         new ByteBufferBlockData(memoryStore.getBytes(blockId).get, false)
       } else if (level.useDisk && diskStore.contains(blockId)) {
         val diskData = diskStore.getBytes(blockId)
@@ -868,8 +870,6 @@ private[spark] class BlockManager(
       level: StorageLevel,
       classTag: ClassTag[T],
       makeIterator: () => Iterator[T]): Either[BlockResult, Iterator[T]] = {
-
-    logDebug("Call to getOrElseUpdate! ");
     // Attempt to read the block from local or remote storage. If it's present, then we don't need
     // to go through the local-get-or-put path.
     get[T](blockId)(classTag) match {

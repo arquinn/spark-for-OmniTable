@@ -132,36 +132,32 @@ case class ResolveLambdaVariables(conf: SQLConf) extends Rule[LogicalPlan] {
   /**
    * Resolve lambda variables in the expression subtree, using the passed lambda variable registry.
    */
-  private def resolve(e: Expression, parentLambdaMap: LambdaVariableMap): Expression = {
+  private def resolve(e: Expression, parentLambdaMap: LambdaVariableMap): Expression = e match {
+    case _ if e.resolved => e
 
-    val output = e match {
-      case _ if e.resolved => e
+    case h: HigherOrderFunction if h.argumentsResolved && h.checkArgumentDataTypes().isSuccess =>
+      h.bind(createLambda).mapChildren(resolve(_, parentLambdaMap))
 
-      case h: HigherOrderFunction if h.argumentsResolved && h.checkArgumentDataTypes().isSuccess =>
-        h.bind(createLambda).mapChildren(resolve(_, parentLambdaMap))
+    case l: LambdaFunction if !l.bound =>
+      // Do not resolve an unbound lambda function. If we see such a lambda function this means
+      // that either the higher order function has yet to be resolved, or that we are seeing
+      // dangling lambda function.
+      l
 
-      case l: LambdaFunction if !l.bound =>
-        // Do not resolve an unbound lambda function. If we see such a lambda function this means
-        // that either the higher order function has yet to be resolved, or that we are seeing
-        // dangling lambda function.
-        l
+    case l: LambdaFunction if !l.hidden =>
+      val lambdaMap = l.arguments.map(v => canonicalizer(v.name) -> v).toMap
+      l.mapChildren(resolve(_, parentLambdaMap ++ lambdaMap))
 
-      case l: LambdaFunction if !l.hidden =>
-        val lambdaMap = l.arguments.map(v => canonicalizer(v.name) -> v).toMap
-        l.mapChildren(resolve(_, parentLambdaMap ++ lambdaMap))
+    case u @ UnresolvedAttribute(name +: nestedFields) =>
+      parentLambdaMap.get(canonicalizer(name)) match {
+        case Some(lambda) =>
+          nestedFields.foldLeft(lambda: Expression) { (expr, fieldName) =>
+            ExtractValue(expr, Literal(fieldName), conf.resolver)
+          }
+        case None => u
+      }
 
-      case u @ UnresolvedNamedLambdaVariable(name +: nestedFields) =>
-        parentLambdaMap.get(canonicalizer(name)) match {
-          case Some(lambda) =>
-            nestedFields.foldLeft(lambda: Expression) { (expr, fieldName) =>
-              ExtractValue(expr, Literal(fieldName), conf.resolver)
-            }
-          case None => u
-        }
-
-      case _ =>
-        e.mapChildren(resolve(_, parentLambdaMap))
-    }
-    output
+    case _ =>
+      e.mapChildren(resolve(_, parentLambdaMap))
   }
 }

@@ -52,7 +52,7 @@ abstract class GenericStrategy[PhysicalPlan <: TreeNode[PhysicalPlan]] extends L
  *
  * @tparam PhysicalPlan The type of physical plan produced by this [[QueryPlanner]]
  */
-abstract class QueryPlanner[PhysicalPlan <: TreeNode[PhysicalPlan]] extends Logging {
+abstract class QueryPlanner[PhysicalPlan <: TreeNode[PhysicalPlan]] {
   /** A list of execution strategies that can be used by the planner */
   def strategies: Seq[GenericStrategy[PhysicalPlan]]
 
@@ -77,13 +77,11 @@ abstract class QueryPlanner[PhysicalPlan <: TreeNode[PhysicalPlan]] extends Logg
             // Plan the logical plan for the placeholder.
             val childPlans = this.plan(logicalPlan)
 
-
             candidatesWithPlaceholders.flatMap { candidateWithPlaceholders =>
               childPlans.map { childPlan =>
                 // Replace the placeholder by the child plan
                 candidateWithPlaceholders.transformUp {
-                  case p if p.eq(placeholder) =>
-                    childPlan
+                  case p if p.eq(placeholder) => childPlan
                 }
               }
             }

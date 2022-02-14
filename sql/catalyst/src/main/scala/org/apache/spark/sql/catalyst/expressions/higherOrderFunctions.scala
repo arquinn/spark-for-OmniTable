@@ -22,34 +22,11 @@ import java.util.concurrent.atomic.AtomicReference
 import scala.collection.mutable
 
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.analysis.{TypeCheckResult, TypeCoercion, UnresolvedAttribute, UnresolvedException}
+import org.apache.spark.sql.catalyst.analysis.{TypeCheckResult, TypeCoercion, UnresolvedAttribute}
 import org.apache.spark.sql.catalyst.expressions.codegen._
 import org.apache.spark.sql.catalyst.util._
 import org.apache.spark.sql.types._
 import org.apache.spark.unsafe.array.ByteArrayMethods
-
-
-/**
- * A placeholder of lambda variables to prevent unexpected resolution of [[LambdaFunction]].
- */
-case class UnresolvedNamedLambdaVariable(nameParts: Seq[String])
-  extends LeafExpression with NamedExpression with Unevaluable {
-
-  override def name: String =
-    nameParts.map(n => if (n.contains(".")) s"`$n`" else n).mkString(".")
-
-  override def exprId: ExprId = throw new UnresolvedException(this, "exprId")
-  override def dataType: DataType = throw new UnresolvedException(this, "dataType")
-  override def nullable: Boolean = throw new UnresolvedException(this, "nullable")
-  override def qualifier: Seq[String] = throw new UnresolvedException(this, "qualifier")
-  override def toAttribute: Attribute = throw new UnresolvedException(this, "toAttribute")
-  override def newInstance(): NamedExpression = throw new UnresolvedException(this, "newInstance")
-  override lazy val resolved = false
-
-  override def toString: String = s"lambda '$name"
-
-  override def sql: String = name
-}
 
 /**
  * A named lambda variable.
@@ -463,107 +440,6 @@ case class ArrayAggregate(
 
   override def prettyName: String = "aggregate"
 }
-
-// backport from 3.0.0
-
-/**
- * Filters entries in a map using the provided function.
- */
-@ExpressionDescription(
-  usage = "_FUNC_(expr, func) - Filters entries in a map using the function.",
-  examples = """
-    Examples:
-      > SELECT _FUNC_(map(1, 0, 2, 2, 3, -1), (k, v) -> k > v);
-       {1:0,3:-1}
-  """,
-  since = "3.0.0")
-case class MapFilter(
-                      argument: Expression,
-                      function: Expression)
-  extends MapBasedSimpleHigherOrderFunction with CodegenFallback {
-
-  @transient lazy val (keyVar, valueVar) = {
-    val args = function.asInstanceOf[LambdaFunction].arguments
-    (args.head.asInstanceOf[NamedLambdaVariable], args.tail.head.asInstanceOf[NamedLambdaVariable])
-  }
-
-  @transient lazy val MapType(keyType, valueType, valueContainsNull) = argument.dataType
-
-  override def bind(f: (Expression, Seq[(DataType, Boolean)]) => LambdaFunction): MapFilter = {
-    copy(function = f(function, (keyType, false) :: (valueType, valueContainsNull) :: Nil))
-  }
-
-  override def nullSafeEval(inputRow: InternalRow, argumentValue: Any): Any = {
-    val m = argumentValue.asInstanceOf[MapData]
-    val f = functionForEval
-    val retKeys = new mutable.ListBuffer[Any]
-    val retValues = new mutable.ListBuffer[Any]
-    m.foreach(keyType, valueType, (k, v) => {
-      keyVar.value.set(k)
-      valueVar.value.set(v)
-      if (f.eval(inputRow).asInstanceOf[Boolean]) {
-        retKeys += k
-        retValues += v
-      }
-    })
-    ArrayBasedMapData(retKeys.toArray, retValues.toArray)
-  }
-
-  override def dataType: DataType = argument.dataType
-
-  override def functionType: AbstractDataType = BooleanType
-
-  override def prettyName: String = "map_filter"
-}
-
-
-/**
- * Returns a map that applies the function to each value of the map.
- */
-@ExpressionDescription(
-  usage = "_FUNC_(expr, func) - Transforms values in the map using the function.",
-  examples = """
-    Examples:
-      > SELECT _FUNC_(map_from_arrays(array(1, 2, 3), array(1, 2, 3)), (k, v) -> v + 1);
-       {1:2,2:3,3:4}
-      > SELECT _FUNC_(map_from_arrays(array(1, 2, 3), array(1, 2, 3)), (k, v) -> k + v);
-       {1:2,2:4,3:6}
-  """,
-  since = "3.0.0")
-case class TransformValues(
-    argument: Expression,
-    function: Expression)
-  extends MapBasedSimpleHigherOrderFunction with CodegenFallback {
-
-  @transient lazy val MapType(keyType, valueType, valueContainsNull) = argument.dataType
-
-  override def dataType: DataType = MapType(keyType, function.dataType, function.nullable)
-
-  override def bind(f: (Expression, Seq[(DataType, Boolean)]) => LambdaFunction)
-  : TransformValues = {
-    copy(function = f(function, (keyType, false) :: (valueType, valueContainsNull) :: Nil))
-  }
-
-  @transient lazy val LambdaFunction(
-    _, (keyVar: NamedLambdaVariable) :: (valueVar: NamedLambdaVariable) :: Nil, _) = function
-
-  override def nullSafeEval(inputRow: InternalRow, argumentValue: Any): Any = {
-    val map = argumentValue.asInstanceOf[MapData]
-    val resultValues = new GenericArrayData(new Array[Any](map.numElements))
-    var i = 0
-    while (i < map.numElements) {
-      keyVar.value.set(map.keyArray().get(i, keyVar.dataType))
-      valueVar.value.set(map.valueArray().get(i, valueVar.dataType))
-      resultValues.update(i, functionForEval.eval(inputRow))
-      i += 1
-    }
-    new ArrayBasedMapData(map.keyArray(), resultValues)
-  }
-
-  override def prettyName: String = "transform_values"
-}
-
-
 
 // scalastyle:off line.size.limit
 @ExpressionDescription(

@@ -57,7 +57,6 @@ case class ProjectExec(projectList: Seq[NamedExpression], child: SparkPlan)
 
   override def doConsume(ctx: CodegenContext, input: Seq[ExprCode], row: ExprCode): String = {
     val exprs = projectList.map(x => BindReferences.bindReference[Expression](x, child.output))
-
     val resultVars = exprs.map(_.genCode(ctx))
     // Evaluation of non-deterministic expressions can't be deferred.
     val nonDeterministicAttrs = projectList.filterNot(_.deterministic).map(_.toAttribute)
@@ -134,7 +133,6 @@ case class FilterExec(condition: Expression, child: SparkPlan)
      */
     def genPredicate(c: Expression, in: Seq[ExprCode], attrs: Seq[Attribute]): String = {
       val bound = BindReferences.bindReference(c, attrs)
-
       val evaluated = evaluateRequiredVariables(child.output, in, c.references)
 
       // Generate the code for the predicate.

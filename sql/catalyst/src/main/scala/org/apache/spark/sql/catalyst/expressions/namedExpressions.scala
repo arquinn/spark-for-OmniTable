@@ -19,7 +19,6 @@ package org.apache.spark.sql.catalyst.expressions
 
 import java.util.{Objects, UUID}
 
-import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.analysis.UnresolvedAttribute
 import org.apache.spark.sql.catalyst.expressions.codegen._
@@ -143,7 +142,7 @@ case class Alias(child: Expression, name: String)(
     val exprId: ExprId = NamedExpression.newExprId,
     val qualifier: Seq[String] = Seq.empty,
     val explicitMetadata: Option[Metadata] = None)
-  extends UnaryExpression with NamedExpression with Logging{
+  extends UnaryExpression with NamedExpression {
 
   // Alias(Generator, xx) need to be transformed into Generate(generator, ...)
   override lazy val resolved =
@@ -324,6 +323,7 @@ case class AttributeReference(
   }
 
   override def toString: String = s"$name#${exprId.id}$typeSuffix$delaySuffix"
+
   // Since the expression id is not in the first constructor it is missing from the default
   // tree string.
   override def simpleString: String = s"$name#${exprId.id}: ${dataType.simpleString}"

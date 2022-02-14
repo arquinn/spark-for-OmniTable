@@ -24,7 +24,7 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.plans.physical
 import org.apache.spark.sql.catalyst.plans.physical.SinglePartition
-import org.apache.spark.sql.execution.{ColumnarBatchScan, LeafExecNode, PushdownExecNode, WholeStageCodegenExec}
+import org.apache.spark.sql.execution.{ColumnarBatchScan, LeafExecNode, WholeStageCodegenExec}
 import org.apache.spark.sql.execution.streaming.continuous._
 import org.apache.spark.sql.sources.v2.DataSourceV2
 import org.apache.spark.sql.sources.v2.reader._
@@ -35,13 +35,12 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
  * Physical plan node for scanning data from a data source.
  */
 case class DataSourceV2ScanExec(
-    output: Seq[Attribute],
+    output: Seq[AttributeReference],
     @transient source: DataSourceV2,
     @transient options: Map[String, String],
     @transient pushedFilters: Seq[Expression],
     @transient reader: DataSourceReader)
-  extends LeafExecNode with DataSourceV2StringFormat with ColumnarBatchScan
-    with PushdownExecNode {
+  extends LeafExecNode with DataSourceV2StringFormat with ColumnarBatchScan {
 
   override def simpleString: String = "ScanV2 " + metadataString
 
@@ -68,12 +67,12 @@ case class DataSourceV2ScanExec(
 
     case s: SupportsReportPartitioning =>
       new DataSourcePartitioning(
-        s.outputPartitioning(), AttributeMap(output.map(a => a.asInstanceOf[Attribute] -> a.name)))
+        s.outputPartitioning(), AttributeMap(output.map(a => a -> a.name)))
 
     case _ => super.outputPartitioning
   }
 
-  protected lazy val partitions: Seq[InputPartition[InternalRow]] = {
+  private lazy val partitions: Seq[InputPartition[InternalRow]] = {
     reader.planInputPartitions().asScala
   }
 
@@ -110,10 +109,8 @@ case class DataSourceV2ScanExec(
     case _ => false
   }
 
-
   override protected def needsUnsafeRowConversion: Boolean = false
 
-  // what would happen if this always used WholeStageCodegenExec...?
   override protected def doExecute(): RDD[InternalRow] = {
     if (supportsBatch) {
       WholeStageCodegenExec(this)(codegenStageId = 0).execute()
@@ -125,14 +122,4 @@ case class DataSourceV2ScanExec(
       }
     }
   }
-
-  override def pushdownMatch(rows: Array[InternalRow]) : RDD[InternalRow] = {
-    reader match {
-      case _: SupportsJoinPushdown =>
-        new DataSourcePushdownRDD(sparkContext, partitions, rows)
-      case _ =>
-        inputRDD
-    }
-  }
-
 }

@@ -97,9 +97,8 @@ abstract class LogicalPlan
    */
   def resolveChildren(
       nameParts: Seq[String],
-      resolver: Resolver): Option[NamedExpression] = {
+      resolver: Resolver): Option[NamedExpression] =
     childAttributes.resolve(nameParts, resolver)
-  }
 
   /**
    * Optionally resolves the given strings to a [[NamedExpression]] based on the output of this
@@ -141,10 +140,7 @@ abstract class LeafNode extends LogicalPlan {
   override def producedAttributes: AttributeSet = outputSet
 
   /** Leaf nodes that can survive analysis must define their own statistics. */
-  def computeStats(): Statistics = {
-    logInfo(s"Who the fuck am I? ${treeString}")
-    throw new UnsupportedOperationException
-  }
+  def computeStats(): Statistics = throw new UnsupportedOperationException
 }
 
 /**

@@ -128,7 +128,6 @@ class Analyzer(
 
   def resolver: Resolver = conf.resolver
 
-
   protected val fixedPoint = FixedPoint(maxIterations)
 
   /**
@@ -761,7 +760,7 @@ class Analyzer(
      * Generate a new logical plan for the right child with different expression IDs
      * for all conflicting attributes.
      */
-    private def dedupRight(left: LogicalPlan, right: LogicalPlan): LogicalPlan = {
+    private def dedupRight (left: LogicalPlan, right: LogicalPlan): LogicalPlan = {
       val conflictingAttributes = left.outputSet.intersect(right.outputSet)
       logDebug(s"Conflicting attributes ${conflictingAttributes.mkString(",")} " +
         s"between $left and $right")
@@ -769,41 +768,36 @@ class Analyzer(
       right.collect {
         // Handle base relations that might appear more than once.
         case oldVersion: MultiInstanceRelation
-          if oldVersion.outputSet.intersect(conflictingAttributes).nonEmpty =>
+            if oldVersion.outputSet.intersect(conflictingAttributes).nonEmpty =>
           val newVersion = oldVersion.newInstance()
           (oldVersion, newVersion)
 
         case oldVersion: SerializeFromObject
-          if oldVersion.outputSet.intersect(conflictingAttributes).nonEmpty =>
+            if oldVersion.outputSet.intersect(conflictingAttributes).nonEmpty =>
           (oldVersion, oldVersion.copy(serializer = oldVersion.serializer.map(_.newInstance())))
 
         // Handle projects that create conflicting aliases.
-        case oldVersion@Project(projectList, _)
-          if findAliases(projectList).intersect(conflictingAttributes).nonEmpty =>
+        case oldVersion @ Project(projectList, _)
+            if findAliases(projectList).intersect(conflictingAttributes).nonEmpty =>
           (oldVersion, oldVersion.copy(projectList = newAliases(projectList)))
 
-        case oldVersion@Aggregate(_, aggregateExpressions, _)
-          if findAliases(aggregateExpressions).intersect(conflictingAttributes).nonEmpty =>
+        case oldVersion @ Aggregate(_, aggregateExpressions, _)
+            if findAliases(aggregateExpressions).intersect(conflictingAttributes).nonEmpty =>
           (oldVersion, oldVersion.copy(aggregateExpressions = newAliases(aggregateExpressions)))
 
-        case oldVersion@FlatMapGroupsInPandas(_, _, output, _)
-          if oldVersion.outputSet.intersect(conflictingAttributes).nonEmpty =>
+        case oldVersion @ FlatMapGroupsInPandas(_, _, output, _)
+            if oldVersion.outputSet.intersect(conflictingAttributes).nonEmpty =>
           (oldVersion, oldVersion.copy(output = output.map(_.newInstance())))
 
         case oldVersion: Generate
-          if oldVersion.producedAttributes.intersect(conflictingAttributes).nonEmpty =>
+            if oldVersion.producedAttributes.intersect(conflictingAttributes).nonEmpty =>
           val newOutput = oldVersion.generatorOutput.map(_.newInstance())
           (oldVersion, oldVersion.copy(generatorOutput = newOutput))
 
-        case oldVersion@Window(windowExpressions, _, _, child)
-          if AttributeSet(windowExpressions.map(_.toAttribute)).intersect(conflictingAttributes)
-            .nonEmpty =>
+        case oldVersion @ Window(windowExpressions, _, _, child)
+            if AttributeSet(windowExpressions.map(_.toAttribute)).intersect(conflictingAttributes)
+              .nonEmpty =>
           (oldVersion, oldVersion.copy(windowExpressions = newAliases(windowExpressions)))
-
-        case oldVersion : PassThrough
-            if oldVersion.producedAttributes.intersect(conflictingAttributes).nonEmpty =>
-
-          (oldVersion, oldVersion.newInstance())
       }
         // Only handle first case, others will be fixed on the next pass.
         .headOption match {
@@ -847,35 +841,35 @@ class Analyzer(
      *                 WHERE t1.c1 = t2.c1)
      * }}}
      * Plan before resolveReference rule.
-     * 'Intersect
-     * :- Project [c1#245, c2#246]
-     * :  +- SubqueryAlias t1
-     * :     +- Relation[c1#245,c2#246] parquet
-     * +- 'Project [*]
-     * +- Filter exists#257 [c1#245]
-     * :  +- Project [1 AS 1#258]
-     * :     +- Filter (outer(c1#245) = c1#251)
-     * :        +- SubqueryAlias t2
-     * :           +- Relation[c1#251,c2#252] parquet
-     * +- SubqueryAlias t1
-     * +- Relation[c1#245,c2#246] parquet
+     *    'Intersect
+     *    :- Project [c1#245, c2#246]
+     *    :  +- SubqueryAlias t1
+     *    :     +- Relation[c1#245,c2#246] parquet
+     *    +- 'Project [*]
+     *       +- Filter exists#257 [c1#245]
+     *       :  +- Project [1 AS 1#258]
+     *       :     +- Filter (outer(c1#245) = c1#251)
+     *       :        +- SubqueryAlias t2
+     *       :           +- Relation[c1#251,c2#252] parquet
+     *       +- SubqueryAlias t1
+     *          +- Relation[c1#245,c2#246] parquet
      * Plan after the resolveReference rule.
-     * Intersect
-     * :- Project [c1#245, c2#246]
-     * :  +- SubqueryAlias t1
-     * :     +- Relation[c1#245,c2#246] parquet
-     * +- Project [c1#259, c2#260]
-     * +- Filter exists#257 [c1#259]
-     * :  +- Project [1 AS 1#258]
-     * :     +- Filter (outer(c1#259) = c1#251) => Updated
-     * :        +- SubqueryAlias t2
-     * :           +- Relation[c1#251,c2#252] parquet
-     * +- SubqueryAlias t1
-     * +- Relation[c1#259,c2#260] parquet  => Outer plan's attributes are de-duplicated.
+     *    Intersect
+     *    :- Project [c1#245, c2#246]
+     *    :  +- SubqueryAlias t1
+     *    :     +- Relation[c1#245,c2#246] parquet
+     *    +- Project [c1#259, c2#260]
+     *       +- Filter exists#257 [c1#259]
+     *       :  +- Project [1 AS 1#258]
+     *       :     +- Filter (outer(c1#259) = c1#251) => Updated
+     *       :        +- SubqueryAlias t2
+     *       :           +- Relation[c1#251,c2#252] parquet
+     *       +- SubqueryAlias t1
+     *          +- Relation[c1#259,c2#260] parquet  => Outer plan's attributes are de-duplicated.
      */
     private def dedupOuterReferencesInSubquery(
-                                                plan: LogicalPlan,
-                                                attrMap: AttributeMap[Attribute]): LogicalPlan = {
+        plan: LogicalPlan,
+        attrMap: AttributeMap[Attribute]): LogicalPlan = {
       plan resolveOperatorsDown { case currentFragment =>
         currentFragment transformExpressions {
           case OuterReference(a: Attribute) =>
@@ -886,24 +880,21 @@ class Analyzer(
       }
     }
 
-    private def resolve(e: Expression, q: LogicalPlan): Expression = {
-      e match {
-        case f: LambdaFunction if !f.bound =>
-          f
-        case u@UnresolvedAttribute(nameParts) =>
-          // Leave unchanged if resolution fails. Hopefully will be resolved next round.
-          val result =
-            withPosition(u) {
-              q.resolveChildren(nameParts, resolver)
-                .orElse(resolveLiteralFunction(nameParts, u, q))
-                .getOrElse(u)
-            }
-          result
-        case UnresolvedExtractValue(child, fieldExpr) if child.resolved =>
-          ExtractValue(child, fieldExpr, resolver)
-        case u =>
-          e.mapChildren(resolve(_, q))
-      }
+    private def resolve(e: Expression, q: LogicalPlan): Expression = e match {
+      case f: LambdaFunction if !f.bound => f
+      case u @ UnresolvedAttribute(nameParts) =>
+        // Leave unchanged if resolution fails. Hopefully will be resolved next round.
+        val result =
+          withPosition(u) {
+            q.resolveChildren(nameParts, resolver)
+              .orElse(resolveLiteralFunction(nameParts, u, q))
+              .getOrElse(u)
+          }
+        logDebug(s"Resolving $u to $result")
+        result
+      case UnresolvedExtractValue(child, fieldExpr) if child.resolved =>
+        ExtractValue(child, fieldExpr, resolver)
+      case _ => e.mapChildren(resolve(_, q))
     }
 
     def apply(plan: LogicalPlan): LogicalPlan = plan.resolveOperatorsUp {
@@ -938,7 +929,6 @@ class Analyzer(
         i.copy(right = dedupRight(left, right))
       case e @ Except(left, right, _) if !e.duplicateResolved =>
         e.copy(right = dedupRight(left, right))
-
       // When resolve `SortOrder`s in Sort based on child, don't report errors as
       // we still have chance to resolve it based on its descendants
       case s @ Sort(ordering, global, child) if child.resolved && !s.resolved =>

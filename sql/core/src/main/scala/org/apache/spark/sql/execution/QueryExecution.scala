@@ -20,7 +20,6 @@ package org.apache.spark.sql.execution
 import java.nio.charset.StandardCharsets
 import java.sql.{Date, Timestamp}
 
-import org.apache.spark.internal.Logging
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{AnalysisException, Row, SparkSession}
 import org.apache.spark.sql.catalyst.InternalRow
@@ -40,7 +39,7 @@ import org.apache.spark.util.Utils
  * While this is not a public class, we should avoid changing the function names for the sake of
  * changing them, because a lot of developers use the feature for debugging.
  */
-class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) extends Logging{
+class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) {
 
   // TODO: Move the planner an optimizer into here from SessionState.
   protected def planner = sparkSession.sessionState.planner
@@ -58,7 +57,7 @@ class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) e
     sparkSession.sessionState.analyzer.executeAndCheck(logical)
   }
 
-  lazy val withCachedData : LogicalPlan = {
+  lazy val withCachedData: LogicalPlan = {
     assertAnalyzed()
     assertSupported()
     sparkSession.sharedState.cacheManager.useCachedData(analyzed)
@@ -68,8 +67,8 @@ class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) e
 
   lazy val sparkPlan: SparkPlan = {
     SparkSession.setActiveSession(sparkSession)
-      // TODO: We use next(), i.e. take the first plan returned by the planner, here for now,
-      //       but we will implement to choose the best plan.
+    // TODO: We use next(), i.e. take the first plan returned by the planner, here for now,
+    //       but we will implement to choose the best plan.
     planner.plan(ReturnAnswer(optimizedPlan)).next()
   }
 
@@ -78,17 +77,14 @@ class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) e
   lazy val executedPlan: SparkPlan = prepareForExecution(sparkPlan)
 
   /** Internal version of the RDD. Avoids copies and has no schema */
-  lazy val toRdd: RDD[InternalRow] = {
-    executedPlan.execute()
-  }
+  lazy val toRdd: RDD[InternalRow] = executedPlan.execute()
 
   /**
    * Prepares a planned [[SparkPlan]] for execution by inserting shuffle operations and internal
    * row format conversions as needed.
    */
   protected def prepareForExecution(plan: SparkPlan): SparkPlan = {
-    (preparations ++ sparkSession.sessionState.prepareExecutionRules)
-      .foldLeft(plan) { case (sp, rule) => rule.apply(sp) }
+    preparations.foldLeft(plan) { case (sp, rule) => rule.apply(sp) }
   }
 
   /** A sequence of rules that will be applied in order to the physical plan before execution. */

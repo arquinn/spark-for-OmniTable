@@ -303,8 +303,8 @@ abstract class SparkStrategies extends QueryPlanner[SparkPlan] {
         joins.BroadcastNestedLoopJoinExec(
           planLater(left), planLater(right), buildSide, joinType, condition) :: Nil
 
-
       // --- Cases where this strategy does not apply ---------------------------------------------
+
       case _ => Nil
     }
   }

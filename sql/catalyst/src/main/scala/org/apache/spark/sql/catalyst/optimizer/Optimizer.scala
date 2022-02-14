@@ -19,7 +19,6 @@ package org.apache.spark.sql.catalyst.optimizer
 
 import scala.collection.mutable
 
-import org.apache.spark.internal.Logging
 import org.apache.spark.sql.AnalysisException
 import org.apache.spark.sql.catalyst.analysis._
 import org.apache.spark.sql.catalyst.catalog.{InMemoryCatalog, SessionCatalog}
@@ -28,7 +27,6 @@ import org.apache.spark.sql.catalyst.expressions.aggregate._
 import org.apache.spark.sql.catalyst.plans._
 import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.catalyst.rules._
-import org.apache.spark.sql.catalyst.util.sideBySide
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
 import org.apache.spark.util.Utils
@@ -60,7 +58,7 @@ abstract class Optimizer(sessionCatalog: SessionCatalog)
       Seq(
         // Operator push down
         PushProjectionThroughUnion,
-        // ReorderJoin,
+        ReorderJoin,
         EliminateOuterJoin,
         PushPredicateThroughJoin,
         PushDownPredicate,
@@ -531,7 +529,7 @@ object PushProjectionThroughUnion extends Rule[LogicalPlan] with PredicateHelper
  *
  * p2 is usually inserted by this rule and useless, p1 could prune the columns anyway.
  */
-object ColumnPruning extends Rule[LogicalPlan] with Logging {
+object ColumnPruning extends Rule[LogicalPlan] {
   private def sameOutput(output1: Seq[Attribute], output2: Seq[Attribute]): Boolean =
     output1.size == output2.size &&
       output1.zip(output2).forall(pair => pair._1.semanticEquals(pair._2))
@@ -619,8 +617,7 @@ object ColumnPruning extends Rule[LogicalPlan] with Logging {
       val required = child.references ++ p.references
       if ((child.inputSet -- required).nonEmpty) {
         val newChildren = child.children.map(c => prunedChild(c, required))
-        val newone = p.copy(child = child.withNewChildren(newChildren))
-        newone
+        p.copy(child = child.withNewChildren(newChildren))
       } else {
         p
       }
@@ -948,134 +945,129 @@ object PruneFilters extends Rule[LogicalPlan] with PredicateHelper {
  *
  * This heuristic is valid assuming the expression evaluation cost is minimal.
  */
-object PushDownPredicate extends Rule[LogicalPlan] with PredicateHelper with Logging{
-  def apply(plan: LogicalPlan): LogicalPlan = {
-    plan transform {
+object PushDownPredicate extends Rule[LogicalPlan] with PredicateHelper {
+  def apply(plan: LogicalPlan): LogicalPlan = plan transform {
+    // SPARK-13473: We can't push the predicate down when the underlying projection output non-
+    // deterministic field(s).  Non-deterministic expressions are essentially stateful. This
+    // implies that, for a given input row, the output are determined by the expression's initial
+    // state and all the input rows processed before. In another word, the order of input rows
+    // matters for non-deterministic expressions, while pushing down predicates changes the order.
+    // This also applies to Aggregate.
+    case Filter(condition, project @ Project(fields, grandChild))
+      if fields.forall(_.deterministic) && canPushThroughCondition(grandChild, condition) =>
 
-      // SPARK-13473: We can't push the predicate down when the underlying projection output non-
-      // deterministic field(s).  Non-deterministic expressions are essentially stateful. This
-      // implies that, for a given input row, the output are determined by the expression's initial
-      // state and all the input rows processed before. In another word, the order of input rows
-      // matters for non-deterministic expressions, while pushing down predicates changes the order.
-      // This also applies to Aggregate.
-      case Filter(condition, project@Project(fields, grandChild))
-        if fields.forall(_.deterministic) && canPushThroughCondition(grandChild, condition) =>
+      // Create a map of Aliases to their values from the child projection.
+      // e.g., 'SELECT a + b AS c, d ...' produces Map(c -> a + b).
+      val aliasMap = AttributeMap(fields.collect {
+        case a: Alias => (a.toAttribute, a.child)
+      })
 
-        // Create a map of Aliases to their values from the child projection.
-        // e.g., 'SELECT a + b AS c, d ...' produces Map(c -> a + b).
-        val aliasMap = AttributeMap(fields.collect {
-          case a: Alias => (a.toAttribute, a.child)
-        })
+      project.copy(child = Filter(replaceAlias(condition, aliasMap), grandChild))
 
-        project.copy(child = Filter(replaceAlias(condition, aliasMap), grandChild))
+    case filter @ Filter(condition, aggregate: Aggregate)
+      if aggregate.aggregateExpressions.forall(_.deterministic)
+        && aggregate.groupingExpressions.nonEmpty =>
+      // Find all the aliased expressions in the aggregate list that don't include any actual
+      // AggregateExpression, and create a map from the alias to the expression
+      val aliasMap = AttributeMap(aggregate.aggregateExpressions.collect {
+        case a: Alias if a.child.find(_.isInstanceOf[AggregateExpression]).isEmpty =>
+          (a.toAttribute, a.child)
+      })
 
-      case filter@Filter(condition, aggregate: Aggregate)
-        if aggregate.aggregateExpressions.forall(_.deterministic)
-          && aggregate.groupingExpressions.nonEmpty =>
-        // Find all the aliased expressions in the aggregate list that don't include any actual
-        // AggregateExpression, and create a map from the alias to the expression
-        val aliasMap = AttributeMap(aggregate.aggregateExpressions.collect {
-          case a: Alias if a.child.find(_.isInstanceOf[AggregateExpression]).isEmpty =>
-            (a.toAttribute, a.child)
-        })
-
-        // For each filter, expand the alias and check if the filter can be evaluated using
-        // attributes produced by the aggregate operator's child operator.
-        val (candidates, nonDeterministic) =
+      // For each filter, expand the alias and check if the filter can be evaluated using
+      // attributes produced by the aggregate operator's child operator.
+      val (candidates, nonDeterministic) =
         splitConjunctivePredicates(condition).partition(_.deterministic)
 
-        val (pushDown, rest) = candidates.partition { cond =>
-          val replaced = replaceAlias(cond, aliasMap)
-          cond.references.nonEmpty && replaced.references.subsetOf(aggregate.child.outputSet)
-        }
+      val (pushDown, rest) = candidates.partition { cond =>
+        val replaced = replaceAlias(cond, aliasMap)
+        cond.references.nonEmpty && replaced.references.subsetOf(aggregate.child.outputSet)
+      }
 
-        val stayUp = rest ++ nonDeterministic
+      val stayUp = rest ++ nonDeterministic
 
-        if (pushDown.nonEmpty) {
-          val pushDownPredicate = pushDown.reduce(And)
-          val replaced = replaceAlias(pushDownPredicate, aliasMap)
-          val newAggregate = aggregate.copy(child = Filter(replaced, aggregate.child))
-          // If there is no more filter to stay up, just eliminate the filter.
-          // Otherwise, create "Filter(stayUp) <- Aggregate <- Filter(pushDownPredicate)".
-          if (stayUp.isEmpty) newAggregate else Filter(stayUp.reduce(And), newAggregate)
-        } else {
-          filter
-        }
+      if (pushDown.nonEmpty) {
+        val pushDownPredicate = pushDown.reduce(And)
+        val replaced = replaceAlias(pushDownPredicate, aliasMap)
+        val newAggregate = aggregate.copy(child = Filter(replaced, aggregate.child))
+        // If there is no more filter to stay up, just eliminate the filter.
+        // Otherwise, create "Filter(stayUp) <- Aggregate <- Filter(pushDownPredicate)".
+        if (stayUp.isEmpty) newAggregate else Filter(stayUp.reduce(And), newAggregate)
+      } else {
+        filter
+      }
 
-      // Push [[Filter]] operators through [[Window]] operators. Parts of the predicate that can be
-      // pushed beneath must satisfy the following conditions:
-      // 1. All the expressions are part of window partitioning key. The expressions can be
-      // compound.
-      // 2. Deterministic.
-      // 3. Placed before any non-deterministic predicates.
-      case filter@Filter(condition, w: Window)
-        if w.partitionSpec.forall(_.isInstanceOf[AttributeReference]) =>
-        val partitionAttrs = AttributeSet(w.partitionSpec.flatMap(_.references))
+    // Push [[Filter]] operators through [[Window]] operators. Parts of the predicate that can be
+    // pushed beneath must satisfy the following conditions:
+    // 1. All the expressions are part of window partitioning key. The expressions can be compound.
+    // 2. Deterministic.
+    // 3. Placed before any non-deterministic predicates.
+    case filter @ Filter(condition, w: Window)
+      if w.partitionSpec.forall(_.isInstanceOf[AttributeReference]) =>
+      val partitionAttrs = AttributeSet(w.partitionSpec.flatMap(_.references))
 
-        val (candidates, nonDeterministic) =
-          splitConjunctivePredicates(condition).partition(_.deterministic)
+      val (candidates, nonDeterministic) =
+        splitConjunctivePredicates(condition).partition(_.deterministic)
 
-        val (pushDown, rest) = candidates.partition { cond =>
-          cond.references.subsetOf(partitionAttrs)
-        }
+      val (pushDown, rest) = candidates.partition { cond =>
+        cond.references.subsetOf(partitionAttrs)
+      }
 
-        val stayUp = rest ++ nonDeterministic
+      val stayUp = rest ++ nonDeterministic
 
-        if (pushDown.nonEmpty) {
-          val pushDownPredicate = pushDown.reduce(And)
-          val newWindow = w.copy(child = Filter(pushDownPredicate, w.child))
-          if (stayUp.isEmpty) newWindow else Filter(stayUp.reduce(And), newWindow)
-        } else {
-          filter
-        }
+      if (pushDown.nonEmpty) {
+        val pushDownPredicate = pushDown.reduce(And)
+        val newWindow = w.copy(child = Filter(pushDownPredicate, w.child))
+        if (stayUp.isEmpty) newWindow else Filter(stayUp.reduce(And), newWindow)
+      } else {
+        filter
+      }
 
-      case filter@Filter(condition, union: Union) =>
+    case filter @ Filter(condition, union: Union) =>
+      // Union could change the rows, so non-deterministic predicate can't be pushed down
+      val (pushDown, stayUp) = splitConjunctivePredicates(condition).partition(_.deterministic)
 
-        // Union could change the rows, so non-deterministic predicate can't be pushed down
-        val (pushDown, stayUp) = splitConjunctivePredicates(condition).partition(_.deterministic)
-
-        if (pushDown.nonEmpty) {
-          val pushDownCond = pushDown.reduceLeft(And)
-          val output = union.output
-          val newGrandChildren = union.children.map { grandchild =>
-            val newCond = pushDownCond transform {
-              case e if output.exists(_.semanticEquals(e)) =>
-                grandchild.output(output.indexWhere(_.semanticEquals(e)))
-            }
-            assert(newCond.references.subsetOf(grandchild.outputSet))
-            Filter(newCond, grandchild)
+      if (pushDown.nonEmpty) {
+        val pushDownCond = pushDown.reduceLeft(And)
+        val output = union.output
+        val newGrandChildren = union.children.map { grandchild =>
+          val newCond = pushDownCond transform {
+            case e if output.exists(_.semanticEquals(e)) =>
+              grandchild.output(output.indexWhere(_.semanticEquals(e)))
           }
-          val newUnion = union.withNewChildren(newGrandChildren)
-          if (stayUp.nonEmpty) {
-            Filter(stayUp.reduceLeft(And), newUnion)
-          } else {
-            newUnion
-          }
+          assert(newCond.references.subsetOf(grandchild.outputSet))
+          Filter(newCond, grandchild)
+        }
+        val newUnion = union.withNewChildren(newGrandChildren)
+        if (stayUp.nonEmpty) {
+          Filter(stayUp.reduceLeft(And), newUnion)
         } else {
-          filter
+          newUnion
         }
+      } else {
+        filter
+      }
 
-      case filter@Filter(condition, watermark: EventTimeWatermark) =>
-        val (pushDown, stayUp) = splitConjunctivePredicates(condition).partition { p =>
-          p.deterministic && !p.references.contains(watermark.eventTime)
-        }
+    case filter @ Filter(condition, watermark: EventTimeWatermark) =>
+      val (pushDown, stayUp) = splitConjunctivePredicates(condition).partition { p =>
+        p.deterministic && !p.references.contains(watermark.eventTime)
+      }
 
-        if (pushDown.nonEmpty) {
-          val pushDownPredicate = pushDown.reduceLeft(And)
-          val newWatermark = watermark.copy(child = Filter(pushDownPredicate, watermark.child))
-          // If there is no more filter to stay up, just eliminate the filter.
-          // Otherwise, create "Filter(stayUp) <- watermark <- Filter(pushDownPredicate)".
-          if (stayUp.isEmpty) newWatermark else Filter(stayUp.reduceLeft(And), newWatermark)
-        } else {
-          filter
-        }
+      if (pushDown.nonEmpty) {
+        val pushDownPredicate = pushDown.reduceLeft(And)
+        val newWatermark = watermark.copy(child = Filter(pushDownPredicate, watermark.child))
+        // If there is no more filter to stay up, just eliminate the filter.
+        // Otherwise, create "Filter(stayUp) <- watermark <- Filter(pushDownPredicate)".
+        if (stayUp.isEmpty) newWatermark else Filter(stayUp.reduceLeft(And), newWatermark)
+      } else {
+        filter
+      }
 
-      case filter@Filter(_, u: UnaryNode)
+    case filter @ Filter(_, u: UnaryNode)
         if canPushThrough(u) && u.expressions.forall(_.deterministic) =>
-        pushDownPredicate(filter, u.child) { predicate =>
-          u.withNewChildren(Seq(Filter(predicate, u.child)))
-        }
-    }
+      pushDownPredicate(filter, u.child) { predicate =>
+        u.withNewChildren(Seq(Filter(predicate, u.child)))
+      }
   }
 
   private def canPushThrough(p: UnaryNode): Boolean = p match {
@@ -1161,7 +1153,6 @@ object PushPredicateThroughJoin extends Rule[LogicalPlan] with PredicateHelper {
       pushDownCandidates.partition(_.references.subsetOf(left.outputSet))
     val (rightEvaluateCondition, commonCondition) =
         rest.partition(expr => expr.references.subsetOf(right.outputSet))
-
 
     (leftEvaluateCondition, rightEvaluateCondition, commonCondition ++ nonDeterministic)
   }
@@ -1250,11 +1241,6 @@ object PushPredicateThroughJoin extends Rule[LogicalPlan] with PredicateHelper {
       }
   }
 }
-
-
-
-
-
 
 /**
  * Combines two adjacent [[Limit]] operators into one, merging the

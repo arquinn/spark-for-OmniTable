@@ -27,7 +27,6 @@ import org.json4s.JsonAST._
 import org.json4s.JsonDSL._
 import org.json4s.jackson.JsonMethods._
 
-import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.FunctionIdentifier
 import org.apache.spark.sql.catalyst.ScalaReflection._
 import org.apache.spark.sql.catalyst.TableIdentifier
@@ -74,7 +73,7 @@ object CurrentOrigin {
 }
 
 // scalastyle:off
-abstract class TreeNode[BaseType <: TreeNode[BaseType]] extends Product with Logging {
+abstract class TreeNode[BaseType <: TreeNode[BaseType]] extends Product {
 // scalastyle:on
   self: BaseType =>
 
@@ -292,36 +291,35 @@ abstract class TreeNode[BaseType <: TreeNode[BaseType]] extends Product with Log
     if (children.nonEmpty) {
       var changed = false
       def mapChild(child: Any): Any = child match {
-          case arg: TreeNode[_] if containsChild(arg) =>
-            val newChild = f(arg.asInstanceOf[BaseType])
-            if (!(newChild fastEquals arg)) {
-              changed = true
-              newChild
-            } else {
-              arg
-            }
-          case tuple@(arg1: TreeNode[_], arg2: TreeNode[_]) =>
-            val newChild1 = if (containsChild(arg1)) {
-              f(arg1.asInstanceOf[BaseType])
-            } else {
-              arg1.asInstanceOf[BaseType]
-            }
+        case arg: TreeNode[_] if containsChild(arg) =>
+          val newChild = f(arg.asInstanceOf[BaseType])
+          if (!(newChild fastEquals arg)) {
+            changed = true
+            newChild
+          } else {
+            arg
+          }
+        case tuple@(arg1: TreeNode[_], arg2: TreeNode[_]) =>
+          val newChild1 = if (containsChild(arg1)) {
+            f(arg1.asInstanceOf[BaseType])
+          } else {
+            arg1.asInstanceOf[BaseType]
+          }
 
-            val newChild2 = if (containsChild(arg2)) {
-              f(arg2.asInstanceOf[BaseType])
-            } else {
-              arg2.asInstanceOf[BaseType]
-            }
+          val newChild2 = if (containsChild(arg2)) {
+            f(arg2.asInstanceOf[BaseType])
+          } else {
+            arg2.asInstanceOf[BaseType]
+          }
 
-            if (!(newChild1 fastEquals arg1) || !(newChild2 fastEquals arg2)) {
-              changed = true
-              (newChild1, newChild2)
-            } else {
-              tuple
-            }
-          case other =>
-            other
-        }
+          if (!(newChild1 fastEquals arg1) || !(newChild2 fastEquals arg2)) {
+            changed = true
+            (newChild1, newChild2)
+          } else {
+            tuple
+          }
+        case other => other
+      }
 
       val newArgs = mapProductIterator {
         case arg: TreeNode[_] if containsChild(arg) =>
@@ -349,9 +347,7 @@ abstract class TreeNode[BaseType <: TreeNode[BaseType]] extends Product with Log
             } else {
               arg
             }
-          case other =>
-            other
-
+          case other => other
         }.view.force // `mapValues` is lazy and we need to force it to materialize
         case d: DataType => d // Avoid unpacking Structs
         case args: Stream[_] => args.map(mapChild).force // Force materialization on stream

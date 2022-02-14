@@ -230,7 +230,7 @@ abstract class Expression extends TreeNode[Expression] {
 
   // Marks this as final, Expression.verboseString should never be called, and thus shouldn't be
   // overridden by concrete classes.
-  final override def verboseString: String = s"$simpleString--${this.getClass().getName()}"
+  final override def verboseString: String = simpleString
 
   override def simpleString: String = toString
 
@@ -554,7 +554,7 @@ abstract class BinaryExpression extends Expression {
 
 
 /**
- * A [[BinaryExpression]]
+ * A [[BinaryExpression]] that is an operator, with two properties:
  *
  * 1. The string representation is "x symbol y", rather than "funcName(x, y)".
  * 2. Two inputs are expected to be of the same type. If the two inputs have different types,
@@ -732,7 +732,7 @@ trait ComplexTypeMergingExpression extends Expression {
 trait UserDefinedExpression
 
 /**
- * MOVED FOR STEAMDRILL
+ * OMNITABLE:
  * When an expression inherits this, meaning the expression is null intolerant (i.e. any null
  * input will result in null output). We will use this information during constructing IsNotNull
  * constraints.

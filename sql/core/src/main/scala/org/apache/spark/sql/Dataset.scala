@@ -33,7 +33,6 @@ import org.apache.spark.api.java.JavaRDD
 import org.apache.spark.api.java.function._
 import org.apache.spark.api.python.{PythonRDD, SerDeUtil}
 import org.apache.spark.broadcast.Broadcast
-import org.apache.spark.internal.Logging
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst._
 import org.apache.spark.sql.catalyst.analysis._
@@ -54,7 +53,6 @@ import org.apache.spark.sql.execution.command._
 import org.apache.spark.sql.execution.datasources.LogicalRelation
 import org.apache.spark.sql.execution.python.EvaluatePython
 import org.apache.spark.sql.execution.stat.StatFunctions
-import org.apache.spark.sql.functions._
 import org.apache.spark.sql.streaming.DataStreamWriter
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.util.SchemaUtils
@@ -62,7 +60,7 @@ import org.apache.spark.storage.StorageLevel
 import org.apache.spark.unsafe.types.CalendarInterval
 import org.apache.spark.util.Utils
 
-object Dataset {
+private[sql] object Dataset {
   def apply[T: Encoder](sparkSession: SparkSession, logicalPlan: LogicalPlan): Dataset[T] = {
     val dataset = new Dataset(sparkSession, logicalPlan, implicitly[Encoder[T]])
     // Eagerly bind the encoder so we verify that the encoder matches the underlying
@@ -105,7 +103,7 @@ object Dataset {
  * code at runtime to serialize the `Person` object into a binary structure. This binary structure
  * often has much lower memory footprint as well as are optimized for efficiency in data processing
  * (e.g. in a columnar format). To understand the internal binary representation for data, use the
- * `schema` function.D
+ * `schema` function.
  *
  * There are typically two ways to create a Dataset. The most common way is by pointing Spark
  * to some files on storage systems, using the `read` function available on a `SparkSession`.
@@ -169,14 +167,12 @@ object Dataset {
  *
  * @since 1.6.0
  */
-// private[sql](
-
 @InterfaceStability.Stable
-class Dataset[T](
+class Dataset[T] private[sql](
     @transient val sparkSession: SparkSession,
     @DeveloperApi @InterfaceStability.Unstable @transient val queryExecution: QueryExecution,
     encoder: Encoder[T])
-  extends Serializable with Logging {
+  extends Serializable {
 
   queryExecution.assertAnalyzed()
 
@@ -190,8 +186,8 @@ class Dataset[T](
   def this(sqlContext: SQLContext, logicalPlan: LogicalPlan, encoder: Encoder[T]) = {
     this(sqlContext.sparkSession, logicalPlan, encoder)
   }
-  // private[sql]
-  @transient val logicalPlan: LogicalPlan = {
+
+  @transient private[sql] val logicalPlan: LogicalPlan = {
     // For various commands (like DDL) and queries with side effects, we force query execution
     // to happen right away to let these side effects take place eagerly.
     queryExecution.analyzed match {
@@ -862,7 +858,6 @@ class Dataset[T](
     Join(logicalPlan, right.logicalPlan, joinType = Inner, None)
   }
 
-
   /**
    * Inner equi-join with another `DataFrame` using the given column.
    *
@@ -1136,13 +1131,11 @@ class Dataset[T](
     withTypedPlan(Join(left, right, joined.joinType, Some(conditionExpr)))
   }
 
-
-
   /**
    * :: Experimental ::
    * Using inner equi-join to join this Dataset returning a `Tuple2` for each pair
    * where `condition` evaluates to true.
-   *c
+   *
    * @param other Right side of the join.
    * @param condition Join expression.
    *
@@ -3381,7 +3374,7 @@ class Dataset[T](
     }
   }
 
-    /**
+  /**
    * Collect all elements from a spark plan.
    */
   private def collectFromPlan(plan: SparkPlan): Array[T] = {
@@ -3410,7 +3403,7 @@ class Dataset[T](
   }
 
   /** A convenient function to wrap a logical plan and produce a DataFrame. */
-  @inline def withPlan(logicalPlan: LogicalPlan): DataFrame = {
+  @inline private def withPlan(logicalPlan: LogicalPlan): DataFrame = {
     Dataset.ofRows(sparkSession, logicalPlan)
   }
 
