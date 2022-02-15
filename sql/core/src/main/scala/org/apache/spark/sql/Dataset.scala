@@ -60,7 +60,7 @@ import org.apache.spark.storage.StorageLevel
 import org.apache.spark.unsafe.types.CalendarInterval
 import org.apache.spark.util.Utils
 
-private[sql] object Dataset {
+object Dataset {
   def apply[T: Encoder](sparkSession: SparkSession, logicalPlan: LogicalPlan): Dataset[T] = {
     val dataset = new Dataset(sparkSession, logicalPlan, implicitly[Encoder[T]])
     // Eagerly bind the encoder so we verify that the encoder matches the underlying
@@ -168,7 +168,7 @@ private[sql] object Dataset {
  * @since 1.6.0
  */
 @InterfaceStability.Stable
-class Dataset[T] private[sql](
+class Dataset[T](
     @transient val sparkSession: SparkSession,
     @DeveloperApi @InterfaceStability.Unstable @transient val queryExecution: QueryExecution,
     encoder: Encoder[T])
@@ -187,7 +187,7 @@ class Dataset[T] private[sql](
     this(sqlContext.sparkSession, logicalPlan, encoder)
   }
 
-  @transient private[sql] val logicalPlan: LogicalPlan = {
+  @transient val logicalPlan: LogicalPlan = {
     // For various commands (like DDL) and queries with side effects, we force query execution
     // to happen right away to let these side effects take place eagerly.
     queryExecution.analyzed match {
@@ -3403,7 +3403,7 @@ class Dataset[T] private[sql](
   }
 
   /** A convenient function to wrap a logical plan and produce a DataFrame. */
-  @inline private def withPlan(logicalPlan: LogicalPlan): DataFrame = {
+  @inline def withPlan(logicalPlan: LogicalPlan): DataFrame = {
     Dataset.ofRows(sparkSession, logicalPlan)
   }
 

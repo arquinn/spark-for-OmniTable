@@ -23,7 +23,6 @@ import org.apache.spark.annotation.{DeveloperApi, Experimental, InterfaceStabili
 import org.apache.spark.sql.catalyst.parser.ParserInterface
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.catalyst.rules.Rule
-import org.apache.spark.sql.execution.SparkPlan
 
 /**
  * :: Experimental ::
@@ -69,7 +68,6 @@ class SparkSessionExtensions {
   type CheckRuleBuilder = SparkSession => LogicalPlan => Unit
   type StrategyBuilder = SparkSession => Strategy
   type ParserBuilder = (SparkSession, ParserInterface) => ParserInterface
-  type PrepareExecutionRuleBuilder = SparkSession => Rule[SparkPlan]
 
   private[this] val resolutionRuleBuilders = mutable.Buffer.empty[RuleBuilder]
 
@@ -153,22 +151,6 @@ class SparkSessionExtensions {
   def injectPlannerStrategy(builder: StrategyBuilder): Unit = {
     plannerStrategyBuilders += builder
   }
-
-  private[this] val prepareExecutionRuleBuilders = mutable.Buffer.empty[PrepareExecutionRuleBuilder]
-
-  private[sql] def buildPrepareExectionRules(session: SparkSession): Seq[Rule[SparkPlan]] = {
-    prepareExecutionRuleBuilders.map(_.apply(session))
-  }
-
-  /**
-   * Inject a planner `Strategy` builder into the [[SparkSession]]. The injected strategy will
-   * be used to convert a `LogicalPlan` into a executable
-   * [[org.apache.spark.sql.execution.SparkPlan]].
-   */
-  def injectPrepareExectionRule(builder: PrepareExecutionRuleBuilder): Unit = {
-    prepareExecutionRuleBuilders += builder
-  }
-
 
   private[this] val parserBuilders = mutable.Buffer.empty[ParserBuilder]
 
